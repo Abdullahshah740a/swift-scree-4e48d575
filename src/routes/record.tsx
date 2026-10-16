@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   Circle,
   Square,
+  Pause,
+  Play,
   Monitor,
   Camera,
   MonitorSpeaker,
@@ -51,6 +53,7 @@ function RecordPage() {
   const qc = useQueryClient();
   const [source, setSource] = useState<SourceType>("screen");
   const [phase, setPhase] = useState<Phase>("idle");
+  const [paused, setPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -71,10 +74,17 @@ function RecordPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
+  // Elapsed-time bookkeeping that survives pause/resume.
+  // startedAtRef = ms timestamp the current running segment began.
+  // baseElapsedRef = seconds accumulated during prior running segments.
   const startedAtRef = useRef<number>(0);
+  const baseElapsedRef = useRef<number>(0);
+  const pausedRef = useRef<boolean>(false);
 
-  // Hidden <video> elements MUST be in the DOM or browsers won't decode and the
-  // composite "both" recording is a static frame.
+  // Hidden <video> elements MUST be in the DOM or browsers won't decode and
+  // the composite "both" recording is a static frame. They're also used to
+  // capture thumbnails in every mode, so they must receive the stream in all
+  // modes — otherwise drawImage throws InvalidStateError and breaks onstop.
   useEffect(() => {
     screenVideoRef.current = document.createElement("video");
     screenVideoRef.current.muted = true;
@@ -97,14 +107,21 @@ function RecordPage() {
     };
   }, []);
 
+  // Elapsed timer. Freezes while paused so the clock reflects real recorded
+  // time, not wall-clock time.
   useEffect(() => {
     if (phase !== "recording") return;
-    const tick = () => setElapsed((Date.now() - startedAtRef.current) / 1000);
+    if (paused) {
+      setElapsed(baseElapsedRef.current);
+      return;
+    }
+    const tick = () =>
+      setElapsed(baseElapsedRef.current + (Date.now() - startedAtRef.current) / 1000);
     timerRef.current = window.setInterval(tick, 200);
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [phase]);
+  }, [phase, paused]);
 
   function stopAllStreams() {
     streamsRef.current.screen?.getTracks().forEach((t) => t.stop());
@@ -123,6 +140,9 @@ function RecordPage() {
     setThumb("");
     setDuration(0);
     setElapsed(0);
+    setPaused(false);
+    pausedRef.current = false;
+    baseElapsedRef.current = 0;
 
     try {
       let combined: MediaStream;
@@ -130,10 +150,16 @@ function RecordPage() {
         const s = await getScreenStream();
         streamsRef.current.screen = s;
         combined = s;
+        const sv = screenVideoRef.current!;
+        sv.srcObject = s;
+        await sv.play().catch(() => {});
       } else if (source === "camera") {
         const c = await getCameraStream();
         streamsRef.current.camera = c;
         combined = c;
+        const cv = camVideoRef.current!;
+        cv.srcObject = c;
+        await cv.play().catch(() => {});
       } else {
         const s = await getScreenStream();
         streamsRef.current.screen = s;
@@ -160,8 +186,6 @@ function RecordPage() {
         canvasRef.current = canvas;
         const ctx = canvas.getContext("2d")!;
         const draw = () => {
-          const sw = screenV.videoWidth || 1280;
-          const sh = screenV.videoHeight || 720;
           ctx.drawImage(screenV, 0, 0, canvas.width, canvas.height);
           if (cam && camV.videoWidth) {
             const camW = Math.round(canvas.width * 0.28);
@@ -188,20 +212,31 @@ function RecordPage() {
 
       streamRef.current = combined;
       const { mimeType } = pickMimeType();
-      const rec = new MediaRecorder(combined, { mimeType, videoBitsPerSecond: 4_000_000 });
+      const rec = new MediaRecorder(combined, {
+        mimeType,
+        videoBitsPerSecond: 4_000_000,
+      });
       recorderRef.current = rec;
       rec.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       rec.onstop = () => {
-        const finalBlob = new Blob(chunksRef.current, {
-          type: mimeType,
-        });
+        // Total recorded time, accounting for any pause.
+        const total = pausedRef.current
+          ? baseElapsedRef.current
+          : baseElapsedRef.current + (Date.now() - startedAtRef.current) / 1000;
+        setDuration(total);
+        const finalBlob = new Blob(chunksRef.current, { type: mimeType });
         setBlob(finalBlob);
-        setDuration((Date.now() - startedAtRef.current) / 1000);
         setPreviewUrl(URL.createObjectURL(finalBlob));
-        const thumbEl = source === "camera" ? camVideoRef.current : screenVideoRef.current;
-        if (thumbEl) setThumb(captureThumb(thumbEl));
+        // Thumbnail is best-effort: a failure here must NOT block the
+        // stopped transition (that was the "Stop button does nothing" bug).
+        try {
+          const thumbEl = source === "camera" ? camVideoRef.current : screenVideoRef.current;
+          if (thumbEl) setThumb(captureThumb(thumbEl));
+        } catch {
+          /* thumbnail optional */
+        }
         stopAllStreams();
         setPhase("stopped");
       };
@@ -214,6 +249,24 @@ function RecordPage() {
       stopAllStreams();
       setPhase("idle");
     }
+  }
+
+  function pauseRecording() {
+    const rec = recorderRef.current;
+    if (!rec || rec.state !== "recording") return;
+    baseElapsedRef.current += (Date.now() - startedAtRef.current) / 1000;
+    rec.pause();
+    pausedRef.current = true;
+    setPaused(true);
+  }
+
+  function resumeRecording() {
+    const rec = recorderRef.current;
+    if (!rec || rec.state !== "paused") return;
+    startedAtRef.current = Date.now();
+    rec.resume();
+    pausedRef.current = false;
+    setPaused(false);
   }
 
   function stopRecording() {
@@ -253,7 +306,7 @@ function RecordPage() {
         toast.success("Recording saved to Cloud");
       }
       setSavedId(id);
-    } catch (e) {
+    } catch {
       toast.error("Save failed — kept locally");
       setSavedId(id);
     }
@@ -324,8 +377,14 @@ function RecordPage() {
 
       {phase === "recording" ? (
         <div className="mt-6">
-          <div className="flex items-center gap-3 rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3">
-            <span className="flex size-3 animate-pulse rounded-full bg-destructive" />
+          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3">
+            <span
+              className={
+                paused
+                  ? "flex size-3 rounded-full bg-warning"
+                  : "flex size-3 animate-pulse rounded-full bg-destructive"
+              }
+            />
             <span className="font-mono text-lg font-semibold text-destructive">
               {Math.floor(elapsed / 60)
                 .toString()
@@ -336,14 +395,27 @@ function RecordPage() {
                 .padStart(2, "0")}
             </span>
             <span className="text-sm text-muted-foreground">
-              · recording {sourceTypeLabel(source)}
+              · {paused ? "paused" : `recording ${sourceTypeLabel(source)}`}
             </span>
-            <button
-              onClick={stopRecording}
-              className="ml-auto inline-flex items-center gap-2 rounded-lg bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90"
-            >
-              <Square className="size-4 fill-current" /> Stop
-            </button>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={paused ? resumeRecording : pauseRecording}
+                className="inline-flex items-center gap-2 rounded-lg border border-input bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-accent"
+              >
+                {paused ? (
+                  <Play className="size-4 fill-current" />
+                ) : (
+                  <Pause className="size-4 fill-current" />
+                )}
+                {paused ? "Resume" : "Pause"}
+              </button>
+              <button
+                onClick={stopRecording}
+                className="inline-flex items-center gap-2 rounded-lg bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90"
+              >
+                <Square className="size-4 fill-current" /> Stop
+              </button>
+            </div>
           </div>
         </div>
       ) : null}

@@ -45,16 +45,20 @@ export async function getCameraStream(): Promise<MediaStream> {
 
 /** Capture a JPEG thumbnail data URL from a video/canvas element. */
 export function captureThumb(video: HTMLVideoElement): string {
+  // drawImage throws InvalidStateError if the element has no decoded frame
+  // yet (readyState < HAVE_CURRENT_DATA). Bail out instead of throwing — a
+  // missing thumbnail must never break the recording stop flow.
+  if (!video || video.readyState < 2 || !video.videoWidth) return "";
   const canvas = document.createElement("canvas");
-  const w = video.videoWidth || 640;
-  const h = video.videoHeight || 360;
+  const w = video.videoWidth;
+  const h = video.videoHeight;
   const scale = Math.min(1, 480 / w);
   canvas.width = Math.round(w * scale);
   canvas.height = Math.round(h * scale);
   const ctx = canvas.getContext("2d");
   if (!ctx) return "";
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   try {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     return canvas.toDataURL("image/jpeg", 0.7);
   } catch {
     return "";
