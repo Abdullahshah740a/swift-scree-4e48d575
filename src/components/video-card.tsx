@@ -110,6 +110,15 @@ export function VideoCard({
   );
 }
 
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+
 function CardMenu({
   video,
   folders,
@@ -125,64 +134,68 @@ function CardMenu({
 }) {
   return (
     <div className="relative shrink-0">
-      <details className="group/menu">
-        <summary
-          className={cn(
-            "flex size-8 cursor-pointer list-none items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent/30 hover:text-foreground active:scale-95",
-          )}
-          aria-label="More actions"
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            aria-label="More actions"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <MoreVertical className="size-4" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          side="bottom"
+          sideOffset={6}
+          className="w-52 p-1.5 z-[100]"
         >
-          <MoreVertical className="size-4" />
-        </summary>
-        <div className="absolute right-0 top-full z-50 mt-1 w-48 rounded-xl border border-border bg-popover p-1.5 text-sm shadow-2xl backdrop-blur-md">
           {onMove ? (
-            <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-              Move to folder
-            </div>
-          ) : null}
-          {onMove ? (
-            <button
-              type="button"
-              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-accent/30 transition-colors"
-              onClick={(e) => {
-                e.stopPropagation();
-                onMove(video, null);
-              }}
-            >
-              <FolderInput className="size-3.5 text-muted-foreground" /> No folder
-            </button>
-          ) : null}
-          {onMove &&
-            folders.map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-accent/30 transition-colors"
+            <>
+              <DropdownMenuLabel className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Move to folder
+              </DropdownMenuLabel>
+              <DropdownMenuItem
+                className="cursor-pointer gap-2 px-2.5 py-1.5 text-xs font-medium"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onMove(video, f.id);
+                  onMove(video, null);
                 }}
               >
-                <FolderInput className="size-3.5 text-muted-foreground" /> {f.name}
-              </button>
-            ))}
+                <FolderInput className="size-3.5 text-muted-foreground" /> No folder
+              </DropdownMenuItem>
+              {folders.map((f) => (
+                <DropdownMenuItem
+                  key={f.id}
+                  className="cursor-pointer gap-2 px-2.5 py-1.5 text-xs font-medium"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onMove(video, f.id);
+                  }}
+                >
+                  <FolderInput className="size-3.5 text-muted-foreground" /> {f.name}
+                </DropdownMenuItem>
+              ))}
+            </>
+          ) : null}
+
           {onDelete ? (
             <>
-              {onMove ? <div className="my-1.5 h-px bg-border/60" /> : null}
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 rounded-lg bg-destructive/15 px-2.5 py-2 text-left text-xs font-semibold text-destructive hover:bg-destructive hover:text-destructive-foreground transition-colors"
+              {onMove ? <DropdownMenuSeparator /> : null}
+              <DropdownMenuItem
+                className="cursor-pointer gap-2 rounded-lg bg-destructive/15 px-2.5 py-2 text-xs font-semibold text-destructive focus:bg-destructive focus:text-destructive-foreground"
                 onClick={(e) => {
                   e.stopPropagation();
                   onDelete(video);
                 }}
               >
-                <Trash2 className="size-4 shrink-0 text-current" /> Delete recording
-              </button>
+                <Trash2 className="size-4 shrink-0" /> Delete recording
+              </DropdownMenuItem>
             </>
           ) : null}
-        </div>
-      </details>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }
