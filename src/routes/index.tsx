@@ -1,10 +1,17 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Circle, Film, Eye, Clock, Clapperboard, ArrowRight } from "lucide-react";
 import { StorageBanner } from "@/components/storage-banner";
 import { VideoCard } from "@/components/video-card";
-import { fetchStorageStatus, fetchVideos, fetchFolders } from "@/lib/storage-client";
+import {
+  fetchStorageStatus,
+  fetchVideos,
+  fetchFolders,
+  removeRecording,
+} from "@/lib/storage-client";
 import { formatDuration } from "@/lib/format";
+import type { VideoRecord } from "@/lib/types";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -27,6 +34,7 @@ export const Route = createFileRoute("/")({
 });
 
 function Index() {
+  const qc = useQueryClient();
   const status = useQuery({
     queryKey: ["storage-status"],
     queryFn: fetchStorageStatus,
@@ -38,6 +46,16 @@ function Index() {
   const totalViews = all.reduce((s, v) => s + v.views, 0);
   const totalLength = all.reduce((s, v) => s + v.duration, 0);
   const recent = all.slice(0, 6);
+
+  const deleteVideoMut = useMutation({
+    mutationFn: async (video: VideoRecord) => {
+      await removeRecording(video.id, video.ext);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["videos"] });
+      toast.success("Recording deleted");
+    },
+  });
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
@@ -109,13 +127,24 @@ function Index() {
           ) : recent.length <= 3 ? (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {recent.map((v) => (
-                <VideoCard key={v.id} video={v} folders={folders.data ?? []} />
+                <VideoCard
+                  key={v.id}
+                  video={v}
+                  folders={folders.data ?? []}
+                  onDelete={(vid) => deleteVideoMut.mutate(vid)}
+                />
               ))}
             </div>
           ) : (
             <div className="flex flex-col gap-2">
               {recent.map((v) => (
-                <VideoCard key={v.id} video={v} folders={folders.data ?? []} compact />
+                <VideoCard
+                  key={v.id}
+                  video={v}
+                  folders={folders.data ?? []}
+                  compact
+                  onDelete={(vid) => deleteVideoMut.mutate(vid)}
+                />
               ))}
             </div>
           )}

@@ -205,7 +205,7 @@ export function WatchContent({
           <VideoPlayer
             ref={playerRef}
             src={url ?? ""}
-            fallbackSrc={fallbackUrl ?? undefined}
+            {...(fallbackUrl ? { fallbackSrc: fallbackUrl } : {})}
             poster={rec.thumbnail}
             comments={comments.data ?? []}
             reactions={reactions.data ?? []}
