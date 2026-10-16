@@ -159,7 +159,10 @@ function RecordPage() {
       ? baseElapsedRef.current
       : baseElapsedRef.current + (Date.now() - startedAtRef.current) / 1000;
     setDuration(total);
-    const finalBlob = new Blob(chunksRef.current, { type: chosenMimeRef.current });
+    // MediaRecorder.mimeType on the instance gives the exact actual recording format
+    const actualMime = recorderRef.current?.mimeType || chosenMimeRef.current;
+    chosenMimeRef.current = actualMime;
+    const finalBlob = new Blob(chunksRef.current, { type: actualMime });
     blobRef.current = finalBlob;
     setPreviewUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
@@ -530,7 +533,16 @@ function RecordPage() {
       {phase === "saving" && previewUrl ? (
         <div className="mt-6 flex flex-col gap-4">
           <div className="overflow-hidden rounded-xl border border-border/60 bg-black">
-            <video src={previewUrl} controls className="size-full max-h-[480px] w-full" />
+            <video
+              src={previewUrl}
+              controls
+              playsInline
+              preload="auto"
+              className="size-full max-h-[480px] w-full"
+            >
+              <source src={previewUrl} type={chosenMimeRef.current} />
+              Your browser does not support playing this video.
+            </video>
           </div>
           <div className="flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/10 px-4 py-3 text-sm text-foreground">
             <Loader2 className="size-4 animate-spin text-primary" />
@@ -542,7 +554,16 @@ function RecordPage() {
       {phase === "stopped" && previewUrl ? (
         <div className="mt-6 flex flex-col gap-4">
           <div className="overflow-hidden rounded-xl border border-border/60 bg-black">
-            <video src={previewUrl} controls className="size-full max-h-[480px] w-full" />
+            <video
+              src={previewUrl}
+              controls
+              playsInline
+              preload="auto"
+              className="size-full max-h-[480px] w-full"
+            >
+              <source src={previewUrl} type={chosenMimeRef.current} />
+              Your browser does not support playing this video.
+            </video>
           </div>
 
           {saveMsg ? (

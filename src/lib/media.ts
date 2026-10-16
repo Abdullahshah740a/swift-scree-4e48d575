@@ -9,6 +9,16 @@ export function pickMimeType(): { mimeType: string; ext: string } {
   if (typeof MediaRecorder === "undefined") {
     return { mimeType: "video/webm;codecs=vp9,opus", ext: "webm" };
   }
+  // Check if MediaRecorder supports a type AND that the browser's HTMLVideoElement
+  // can actually play it back (canPlayType) — preventing formats like mp4 with
+  // unsupported codecs from failing in the preview player.
+  const videoTester = typeof document !== "undefined" ? document.createElement("video") : null;
+  const canPlay = (mime: string) => {
+    if (!videoTester) return true;
+    const res = videoTester.canPlayType(mime);
+    return res === "probably" || res === "maybe";
+  };
+
   const candidates: Array<{ mimeType: string; ext: string }> = [
     { mimeType: "video/mp4;codecs=avc1,mp4a.40.2", ext: "mp4" },
     { mimeType: "video/mp4", ext: "mp4" },
@@ -17,6 +27,12 @@ export function pickMimeType(): { mimeType: string; ext: string } {
     { mimeType: "video/webm;codecs=h264,opus", ext: "webm" },
     { mimeType: "video/webm", ext: "webm" },
   ];
+  for (const c of candidates) {
+    if (MediaRecorder.isTypeSupported?.(c.mimeType) && canPlay(c.mimeType)) {
+      return c;
+    }
+  }
+  // Fallback to checking just MediaRecorder support if canPlayType was too strict
   for (const c of candidates) {
     if (MediaRecorder.isTypeSupported?.(c.mimeType)) {
       return c;

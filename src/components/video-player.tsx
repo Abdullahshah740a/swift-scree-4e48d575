@@ -85,6 +85,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
         poster={poster}
         className="size-full w-full max-h-[70vh] bg-black"
         playsInline
+        preload="auto"
         onClick={togglePlay}
       />
       {/* Controls */}
