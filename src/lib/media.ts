@@ -2,8 +2,12 @@ import type { SourceType } from "./types";
 // sourceTypeLabel lives in ./format now; media.ts is browser capture only.
 
 /**
- * Choose a MediaRecorder mimeType the browser supports, preferring MP4
- * (avc1/mp4a) over WebM (vp9/opus, vp8/opus, h264/opus, plain webm).
+ * Choose a MediaRecorder mimeType the browser supports. WebM (VP9/VP8 + Opus)
+ * is prioritized because MediaRecorder records it reliably in Chromium and
+ * Firefox and <video> decodes it incrementally over HTTP. MP4 is kept only
+ * as a last-resort fallback for Safari, which historically couldn't record
+ * WebM — Chrome's MediaRecorder MP4 output is fragmented and often fails
+ * to play back without a transcode-mux.
  */
 export function pickMimeType(): { mimeType: string; ext: string } {
   if (typeof MediaRecorder === "undefined") {

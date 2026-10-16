@@ -28,6 +28,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
   const [duration, setDuration] = useState(0);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
+  const [videoError, setVideoError] = useState<string | null>(null);
 
   useImperativeHandle(ref, () => ({
     getCurrentTime: () => videoRef.current?.currentTime ?? 0,
@@ -76,8 +77,6 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
     ...comments.map((c) => ({ time: c.time, kind: "comment" as const })),
     ...reactions.map((r) => ({ time: r.time, kind: "reaction" as const })),
   ];
-
-  const [videoError, setVideoError] = useState<string | null>(null);
 
   return (
     <div className="group relative overflow-hidden rounded-xl border border-border/60 bg-black">
