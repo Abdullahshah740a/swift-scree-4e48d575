@@ -1,0 +1,457 @@
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useRef, useState } from "react";
+import {
+  Circle,
+  Square,
+  Monitor,
+  Camera,
+  MonitorSpeaker,
+  Check,
+  Loader2,
+  AlertTriangle,
+} from "lucide-react";
+import {
+  captureThumb,
+  getCameraStream,
+  getScreenStream,
+  pickMimeType,
+  sourceTypeLabel,
+  type RecordingStreams,
+} from "@/lib/media";
+import { extFromMime } from "@/lib/format";
+import { saveRecording } from "@/lib/storage-client";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import type { SourceType } from "@/lib/types";
+
+export const Route = createFileRoute("/record")({
+  head: () => ({
+    meta: [
+      { title: "Swift Screen — Record" },
+      {
+        name: "description",
+        content: "Record your screen and camera with Swift Screen.",
+      },
+      { property: "og:title", content: "Swift Screen — Record" },
+      {
+        property: "og:description",
+        content: "Record your screen and camera with Swift Screen.",
+      },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
+    ],
+  }),
+  component: RecordPage,
+});
+
+type Phase = "idle" | "recording" | "stopped" | "saving";
+
+function RecordPage() {
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const [source, setSource] = useState<SourceType>("screen");
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [blob, setBlob] = useState<Blob | null>(null);
+  const [thumb, setThumb] = useState<string>("");
+  const [duration, setDuration] = useState(0);
+  const [title, setTitle] = useState("");
+  const [author, setAuthor] = useState("");
+  const [desc, setDesc] = useState("");
+  const [savedId, setSavedId] = useState<string | null>(null);
+
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<BlobPart[]>([]);
+  const streamsRef = useRef<RecordingStreams>({ screen: null, camera: null });
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const screenVideoRef = useRef<HTMLVideoElement | null>(null);
+  const camVideoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const timerRef = useRef<number | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const startedAtRef = useRef<number>(0);
+
+  // Hidden <video> elements MUST be in the DOM or browsers won't decode and the
+  // composite "both" recording is a static frame.
+  useEffect(() => {
+    screenVideoRef.current = document.createElement("video");
+    screenVideoRef.current.muted = true;
+    screenVideoRef.current.playsInline = true;
+    screenVideoRef.current.style.cssText =
+      "position:fixed;left:-9999px;top:-9999px;width:2px;height:2px;opacity:0;";
+    document.body.appendChild(screenVideoRef.current);
+
+    camVideoRef.current = document.createElement("video");
+    camVideoRef.current.muted = true;
+    camVideoRef.current.playsInline = true;
+    camVideoRef.current.style.cssText =
+      "position:fixed;left:-9999px;top:-9999px;width:2px;height:2px;opacity:0;";
+    document.body.appendChild(camVideoRef.current);
+
+    return () => {
+      [screenVideoRef.current, camVideoRef.current].forEach((v) => {
+        if (v?.parentElement) v.parentElement.removeChild(v);
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    if (phase !== "recording") return;
+    const tick = () => setElapsed((Date.now() - startedAtRef.current) / 1000);
+    timerRef.current = window.setInterval(tick, 200);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [phase]);
+
+  function stopAllStreams() {
+    streamsRef.current.screen?.getTracks().forEach((t) => t.stop());
+    streamsRef.current.camera?.getTracks().forEach((t) => t.stop());
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamsRef.current = { screen: null, camera: null };
+    streamRef.current = null;
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+  }
+
+  async function startRecording() {
+    setError(null);
+    chunksRef.current = [];
+    setBlob(null);
+    setPreviewUrl(null);
+    setThumb("");
+    setDuration(0);
+    setElapsed(0);
+
+    try {
+      let combined: MediaStream;
+      if (source === "screen") {
+        const s = await getScreenStream();
+        streamsRef.current.screen = s;
+        combined = s;
+      } else if (source === "camera") {
+        const c = await getCameraStream();
+        streamsRef.current.camera = c;
+        combined = c;
+      } else {
+        const s = await getScreenStream();
+        streamsRef.current.screen = s;
+        let cam: MediaStream | null = null;
+        try {
+          cam = await getCameraStream();
+          streamsRef.current.camera = cam;
+        } catch {
+          // camera optional in "both"; fall back to screen only
+        }
+
+        const screenV = screenVideoRef.current!;
+        const camV = camVideoRef.current!;
+        screenV.srcObject = s;
+        await screenV.play().catch(() => {});
+        if (cam) {
+          camV.srcObject = cam;
+          await camV.play().catch(() => {});
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = 1280;
+        canvas.height = 720;
+        canvasRef.current = canvas;
+        const ctx = canvas.getContext("2d")!;
+        const draw = () => {
+          const sw = screenV.videoWidth || 1280;
+          const sh = screenV.videoHeight || 720;
+          ctx.drawImage(screenV, 0, 0, canvas.width, canvas.height);
+          if (cam && camV.videoWidth) {
+            const camW = Math.round(canvas.width * 0.28);
+            const camH = Math.round((camV.videoHeight / camV.videoWidth) * camW);
+            const px = canvas.width - camW - 24;
+            const py = canvas.height - camH - 24;
+            ctx.save();
+            ctx.fillStyle = "rgba(0,0,0,0.4)";
+            ctx.fillRect(px - 6, py - 6, camW + 12, camH + 12);
+            ctx.beginPath();
+            ctx.roundRect(px, py, camW, camH, 12);
+            ctx.clip();
+            ctx.drawImage(camV, px, py, camW, camH);
+            ctx.restore();
+          }
+          rafRef.current = requestAnimationFrame(draw);
+        };
+        rafRef.current = requestAnimationFrame(draw);
+        combined = canvas.captureStream(30);
+        if (s.getAudioTracks().length) {
+          s.getAudioTracks().forEach((t) => combined.addTrack(t));
+        }
+      }
+
+      streamRef.current = combined;
+      const { mimeType } = pickMimeType();
+      const rec = new MediaRecorder(combined, { mimeType, videoBitsPerSecond: 4_000_000 });
+      recorderRef.current = rec;
+      rec.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      rec.onstop = () => {
+        const finalBlob = new Blob(chunksRef.current, {
+          type: mimeType,
+        });
+        setBlob(finalBlob);
+        setDuration((Date.now() - startedAtRef.current) / 1000);
+        setPreviewUrl(URL.createObjectURL(finalBlob));
+        const thumbEl = source === "camera" ? camVideoRef.current : screenVideoRef.current;
+        if (thumbEl) setThumb(captureThumb(thumbEl));
+        stopAllStreams();
+        setPhase("stopped");
+      };
+      rec.start(1000);
+      startedAtRef.current = Date.now();
+      setPhase("recording");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Could not start recording";
+      setError(msg);
+      stopAllStreams();
+      setPhase("idle");
+    }
+  }
+
+  function stopRecording() {
+    recorderRef.current?.stop();
+  }
+
+  async function save() {
+    if (!blob) return;
+    setPhase("saving");
+    const id = crypto.randomUUID();
+    const { mimeType } = pickMimeType();
+    const ext = extFromMime(mimeType);
+    const record = {
+      id,
+      title: title.trim() || `Recording ${new Date().toLocaleString()}`,
+      description: desc.trim(),
+      author: author.trim() || "You",
+      mimeType,
+      ext,
+      duration: Math.round(duration),
+      size: blob.size,
+      sourceType: source,
+      thumbnail: thumb,
+      folderId: null,
+      views: 0,
+      createdAt: Date.now(),
+      storagePath: `videos/${id}.${ext}`,
+    };
+
+    try {
+      const result = await saveRecording(record, blob);
+      qc.invalidateQueries({ queryKey: ["videos"] });
+      qc.invalidateQueries({ queryKey: ["storage-status"] });
+      if (result.localOnly) {
+        toast.success("Saved locally (Cloud not configured)");
+      } else {
+        toast.success("Recording saved to Cloud");
+      }
+      setSavedId(id);
+    } catch (e) {
+      toast.error("Save failed — kept locally");
+      setSavedId(id);
+    }
+  }
+
+  return (
+    <div className="mx-auto max-w-4xl px-4 py-8">
+      <h1 className="text-2xl font-bold tracking-tight text-foreground">New recording</h1>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Capture your screen, camera, or both. Saved to the shared library.
+      </p>
+
+      {error ? (
+        <div className="mt-4 flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      {phase === "idle" ? (
+        <div className="mt-6">
+          <p className="text-sm font-medium text-foreground">Capture source</p>
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <SourceOption
+              active={source === "screen"}
+              onClick={() => setSource("screen")}
+              icon={<Monitor className="size-5" />}
+              label="Screen only"
+              desc="Capture any window or display"
+            />
+            <SourceOption
+              active={source === "camera"}
+              onClick={() => setSource("camera")}
+              icon={<Camera className="size-5" />}
+              label="Camera only"
+              desc="Record from your webcam"
+            />
+            <SourceOption
+              active={source === "both"}
+              onClick={() => setSource("both")}
+              icon={<MonitorSpeaker className="size-5" />}
+              label="Screen + Cam"
+              desc="Composite webcam over screen"
+            />
+          </div>
+
+          <div className="mt-5 max-w-xs">
+            <label className="text-sm font-medium text-foreground">Your name</label>
+            <input
+              value={author}
+              onChange={(e) => setAuthor(e.target.value)}
+              placeholder="Optional — shows on share pages"
+              className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+
+          <button
+            onClick={startRecording}
+            className="mt-6 inline-flex items-center gap-2 rounded-lg bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-lg shadow-primary/25 transition-transform hover:scale-[1.02]"
+          >
+            <Circle className="size-4 fill-current" /> Start recording
+          </button>
+          <p className="mt-2 text-xs text-muted-foreground">
+            You'll be prompted to grant screen/camera permission.
+          </p>
+        </div>
+      ) : null}
+
+      {phase === "recording" ? (
+        <div className="mt-6">
+          <div className="flex items-center gap-3 rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3">
+            <span className="flex size-3 animate-pulse rounded-full bg-destructive" />
+            <span className="font-mono text-lg font-semibold text-destructive">
+              {Math.floor(elapsed / 60)
+                .toString()
+                .padStart(2, "0")}
+              :
+              {Math.floor(elapsed % 60)
+                .toString()
+                .padStart(2, "0")}
+            </span>
+            <span className="text-sm text-muted-foreground">
+              · recording {sourceTypeLabel(source)}
+            </span>
+            <button
+              onClick={stopRecording}
+              className="ml-auto inline-flex items-center gap-2 rounded-lg bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90"
+            >
+              <Square className="size-4 fill-current" /> Stop
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {(phase === "stopped" || phase === "saving") && previewUrl ? (
+        <div className="mt-6 flex flex-col gap-4">
+          <div className="overflow-hidden rounded-xl border border-border/60 bg-black">
+            <video src={previewUrl} controls className="size-full max-h-[480px] w-full" />
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium text-foreground">Title</label>
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="Recording title"
+                className="rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+              <label className="mt-1 text-sm font-medium text-foreground">Description</label>
+              <textarea
+                value={desc}
+                onChange={(e) => setDesc(e.target.value)}
+                placeholder="What's this about?"
+                rows={3}
+                className="rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            </div>
+            <div className="flex flex-col justify-end gap-3">
+              <p className="text-xs text-muted-foreground">
+                {sourceTypeLabel(source)} · {Math.round(duration)}s ·{savedId ? " saved" : ""}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={save}
+                  disabled={phase === "saving"}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {phase === "saving" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Check className="size-4" />
+                  )}
+                  Save to library
+                </button>
+                <Link
+                  to="/record"
+                  onClick={() => {
+                    setPhase("idle");
+                    setBlob(null);
+                    setPreviewUrl(null);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-lg border border-input bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent"
+                >
+                  Discard
+                </Link>
+              </div>
+            </div>
+          </div>
+          {savedId ? (
+            <div className="flex items-center gap-2 rounded-lg border border-success/40 bg-success/10 px-4 py-3 text-sm text-foreground">
+              <Check className="size-4 text-success" /> Saved.
+              <button
+                onClick={() => {
+                  qc.invalidateQueries({ queryKey: ["videos"] });
+                  navigate({ to: "/watch/$id", params: { id: savedId } });
+                }}
+                className="ml-auto text-primary hover:underline"
+              >
+                Watch →
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SourceOption({
+  active,
+  onClick,
+  icon,
+  label,
+  desc,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+  desc: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex flex-col items-start gap-1 rounded-xl border p-4 text-left transition-colors"
+      style={{
+        borderColor: active ? "var(--primary)" : "var(--border)",
+        background: active ? "color-mix(in oklab, var(--primary) 10%, transparent)" : "transparent",
+      }}
+    >
+      <span
+        className="text-primary"
+        style={{ color: active ? "var(--primary)" : "var(--muted-foreground)" }}
+      >
+        {icon}
+      </span>
+      <span className="text-sm font-semibold text-foreground">{label}</span>
+      <span className="text-xs text-muted-foreground">{desc}</span>
+    </button>
+  );
+}

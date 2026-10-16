@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Swift Screen clapperboard">
+  <rect x="6" y="22" width="52" height="36" rx="6" fill="#16181f"/>
+  <rect x="6" y="22" width="52" height="9" rx="4" fill="#2a2d38"/>
+  <g transform="rotate(-20 32 18)">
+    <rect x="6" y="12" width="52" height="11" rx="3" fill="#16181f"/>
+    <rect x="10" y="13" width="7" height="9" transform="skewX(-28)" fill="#f4f1ea"/>
+    <rect x="26" y="13" width="7" height="9" transform="skewX(-28)" fill="#f4f1ea"/>
+    <rect x="42" y="13" width="7" height="9" transform="skewX(-28)" fill="#f4f1ea"/>
+    <rect x="18" y="13" width="7" height="9" transform="skewX(-28)" fill="#e8553a"/>
+    <rect x="34" y="13" width="7" height="9" transform="skewX(-28)" fill="#e8553a"/>
+  </g>
+  <circle cx="48" cy="48" r="4.5" fill="#e8553a"/>
+</svg>

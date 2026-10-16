@@ -10,33 +10,91 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as LibraryRouteImport } from './routes/library'
+import { Route as RecordRouteImport } from './routes/record'
+import { Route as VIdRouteImport } from './routes/v.$id'
+import { Route as WatchIdRouteImport } from './routes/watch.$id'
+import { Route as ApiVideoIdRouteImport } from './routes/api/video.$id'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LibraryRoute = LibraryRouteImport.update({
+  id: '/library',
+  path: '/library',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RecordRoute = RecordRouteImport.update({
+  id: '/record',
+  path: '/record',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VIdRoute = VIdRouteImport.update({
+  id: '/v/$id',
+  path: '/v/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WatchIdRoute = WatchIdRouteImport.update({
+  id: '/watch/$id',
+  path: '/watch/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiVideoIdRoute = ApiVideoIdRouteImport.update({
+  id: '/api/video/$id',
+  path: '/api/video/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/library': typeof LibraryRoute
+  '/record': typeof RecordRoute
+  '/v/$id': typeof VIdRoute
+  '/watch/$id': typeof WatchIdRoute
+  '/api/video/$id': typeof ApiVideoIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/library': typeof LibraryRoute
+  '/record': typeof RecordRoute
+  '/v/$id': typeof VIdRoute
+  '/watch/$id': typeof WatchIdRoute
+  '/api/video/$id': typeof ApiVideoIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/library': typeof LibraryRoute
+  '/record': typeof RecordRoute
+  '/v/$id': typeof VIdRoute
+  '/watch/$id': typeof WatchIdRoute
+  '/api/video/$id': typeof ApiVideoIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    '/' | '/library' | '/record' | '/v/$id' | '/watch/$id' | '/api/video/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/library' | '/record' | '/v/$id' | '/watch/$id' | '/api/video/$id'
+  id:
+    | '__root__'
+    | '/'
+    | '/library'
+    | '/record'
+    | '/v/$id'
+    | '/watch/$id'
+    | '/api/video/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  LibraryRoute: typeof LibraryRoute
+  RecordRoute: typeof RecordRoute
+  VIdRoute: typeof VIdRoute
+  WatchIdRoute: typeof WatchIdRoute
+  ApiVideoIdRoute: typeof ApiVideoIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +106,51 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/library': {
+      id: '/library'
+      path: '/library'
+      fullPath: '/library'
+      preLoaderRoute: typeof LibraryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/record': {
+      id: '/record'
+      path: '/record'
+      fullPath: '/record'
+      preLoaderRoute: typeof RecordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/v/$id': {
+      id: '/v/$id'
+      path: '/v/$id'
+      fullPath: '/v/$id'
+      preLoaderRoute: typeof VIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/watch/$id': {
+      id: '/watch/$id'
+      path: '/watch/$id'
+      fullPath: '/watch/$id'
+      preLoaderRoute: typeof WatchIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/video/$id': {
+      id: '/api/video/$id'
+      path: '/api/video/$id'
+      fullPath: '/api/video/$id'
+      preLoaderRoute: typeof ApiVideoIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  LibraryRoute: LibraryRoute,
+  RecordRoute: RecordRoute,
+  VIdRoute: VIdRoute,
+  WatchIdRoute: WatchIdRoute,
+  ApiVideoIdRoute: ApiVideoIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
