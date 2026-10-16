@@ -83,6 +83,10 @@ function RecordPage() {
   const startedAtRef = useRef<number>(0);
   const baseElapsedRef = useRef<number>(0);
   const pausedRef = useRef<boolean>(false);
+  // Guards the stop/finalize flow so onstop + safety net + onerror can never
+  // double-fire, and the UI can never hang on "Finalizing…".
+  const stopRequestedRef = useRef<boolean>(false);
+  const safetyTimerRef = useRef<number | null>(null);
 
   // Hidden <video> elements MUST be in the DOM or browsers won't decode and
   // the composite "both" recording is a static frame. They're also used to
@@ -133,6 +137,46 @@ function RecordPage() {
     streamsRef.current = { screen: null, camera: null };
     streamRef.current = null;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (safetyTimerRef.current) {
+      clearTimeout(safetyTimerRef.current);
+      safetyTimerRef.current = null;
+    }
+  }
+
+  // Build the blob from whatever chunks we have and run the save. Called from
+  // onstop normally, but also from the safety-net timer / onerror so the UI
+  // can never hang on "Finalizing…". Idempotent: stopRequestedRef prevents a
+  // double-fire if onstop and the safety net both run.
+  function finalizeFromChunks(_reason: "onstop" | "safety" | "error") {
+    if (stopRequestedRef.current) return;
+    stopRequestedRef.current = true;
+    if (safetyTimerRef.current) {
+      clearTimeout(safetyTimerRef.current);
+      safetyTimerRef.current = null;
+    }
+
+    const total = pausedRef.current
+      ? baseElapsedRef.current
+      : baseElapsedRef.current + (Date.now() - startedAtRef.current) / 1000;
+    setDuration(total);
+    const finalBlob = new Blob(chunksRef.current, { type: chosenMimeRef.current });
+    blobRef.current = finalBlob;
+    setPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return URL.createObjectURL(finalBlob);
+    });
+    let thumbData = "";
+    try {
+      const thumbEl = source === "camera" ? camVideoRef.current : screenVideoRef.current;
+      if (thumbEl) {
+        thumbData = captureThumb(thumbEl);
+        setThumb(thumbData);
+      }
+    } catch {
+      /* thumbnail optional */
+    }
+    stopAllStreams();
+    void finalizeAndSave(finalBlob, total, thumbData);
   }
 
   // Called directly from onstop — this is what makes Stop actually persist
@@ -181,6 +225,11 @@ function RecordPage() {
     setError(null);
     chunksRef.current = [];
     blobRef.current = null;
+    stopRequestedRef.current = false;
+    if (safetyTimerRef.current) {
+      clearTimeout(safetyTimerRef.current);
+      safetyTimerRef.current = null;
+    }
     setThumb("");
     setDuration(0);
     setElapsed(0);
@@ -267,30 +316,15 @@ function RecordPage() {
       rec.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
+      rec.onerror = (e) => {
+        // A recorder error must still finalize so the UI doesn't hang.
+        console.warn("MediaRecorder error", e);
+        finalizeFromChunks("error");
+      };
       rec.onstop = () => {
-        // Total recorded time, accounting for any pause.
-        const total = pausedRef.current
-          ? baseElapsedRef.current
-          : baseElapsedRef.current + (Date.now() - startedAtRef.current) / 1000;
-        setDuration(total);
-        const finalBlob = new Blob(chunksRef.current, { type: chosenMimeRef.current });
-        blobRef.current = finalBlob;
-        setPreviewUrl(URL.createObjectURL(finalBlob));
-        // Thumbnail is best-effort: a failure here must NOT block the stop
-        // flow (that was the original "Stop button does nothing" bug).
-        let thumbData = "";
-        try {
-          const thumbEl = source === "camera" ? camVideoRef.current : screenVideoRef.current;
-          if (thumbEl) {
-            thumbData = captureThumb(thumbEl);
-            setThumb(thumbData);
-          }
-        } catch {
-          /* thumbnail optional */
-        }
-        stopAllStreams();
-        // Persist immediately — Stop should save, not just preview.
-        void finalizeAndSave(finalBlob, total, thumbData);
+        // Canonical finalize path. stop() always fires this; the safety net
+        // is only a fallback if it somehow doesn't.
+        finalizeFromChunks("onstop");
       };
       rec.start(1000);
       startedAtRef.current = Date.now();
@@ -321,18 +355,25 @@ function RecordPage() {
     setPaused(false);
   }
 
-  // requestData() forces a final dataavailable chunk so the last second of
-  // footage flushes before stop; then stop() fires onstop which saves.
+  // stop() fires onstop (which finalizes). We do NOT call requestData()
+  // first: stop() already flushes a final dataavailable chunk, and calling
+  // requestData() immediately before stop() races in Chrome and can suppress
+  // the stop event — that was the bug where the UI hung on "Finalizing…".
+  // A safety-net timer forces finalize if onstop doesn't fire in 3.5s.
   function stopRecording() {
     const rec = recorderRef.current;
     if (!rec || rec.state === "inactive") return;
+    if (stopRequestedRef.current) return;
     setPhase("finalizing");
+    stopRequestedRef.current = false; // reset; finalizeFromChunks sets it true
+    safetyTimerRef.current = window.setTimeout(() => {
+      if (!stopRequestedRef.current) finalizeFromChunks("safety");
+    }, 3500);
     try {
-      rec.requestData();
+      rec.stop();
     } catch {
-      /* some browsers throw if already stopping */
+      finalizeFromChunks("error");
     }
-    rec.stop();
   }
 
   async function updateDetails() {
