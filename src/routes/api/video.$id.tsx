@@ -23,7 +23,7 @@ export const Route = createFileRoute("/api/video/$id")({
         const path = `videos/${rec.id}.${rec.ext}`;
         const remote = `${url}/storage/v1/object/${encodeURIComponent(bucket)}/${encodeURIComponent(path)}`;
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 9000);
+        const timer = setTimeout(() => controller.abort(), 12000);
         try {
           const res = await fetch(remote, {
             signal: controller.signal,
@@ -31,11 +31,23 @@ export const Route = createFileRoute("/api/video/$id")({
           });
           if (!res.ok) return new Response("Video missing", { status: 502 });
           const arrayBuf = await res.arrayBuffer();
+
+          // Ensure mime type without strict codec parameters that browsers like Chrome/Firefox
+          // reject with "No video with supported format and MIME type found" when served via HTTP.
+          let cleanMime = rec.mimeType || "video/webm";
+          if (cleanMime.startsWith("video/mp4")) {
+            cleanMime = "video/mp4";
+          } else if (cleanMime.startsWith("video/webm")) {
+            cleanMime = "video/webm";
+          }
+
           return new Response(arrayBuf, {
             status: 200,
             headers: {
-              "content-type": rec.mimeType,
-              "cache-control": "public, max-age=3600",
+              "Content-Type": cleanMime,
+              "Accept-Ranges": "bytes",
+              "Content-Length": arrayBuf.byteLength.toString(),
+              "Cache-Control": "public, max-age=3600",
             },
           });
         } catch {

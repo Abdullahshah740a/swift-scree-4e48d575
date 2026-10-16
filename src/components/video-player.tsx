@@ -77,15 +77,41 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
     ...reactions.map((r) => ({ time: r.time, kind: "reaction" as const })),
   ];
 
+  const [videoError, setVideoError] = useState<string | null>(null);
+
   return (
     <div className="group relative overflow-hidden rounded-xl border border-border/60 bg-black">
+      {videoError ? (
+        <div className="flex min-h-[320px] flex-col items-center justify-center p-6 text-center text-muted-foreground">
+          <p className="text-sm font-medium text-foreground">Playback issue</p>
+          <p className="mt-1 text-xs text-muted-foreground">{videoError}</p>
+          <a
+            href={src}
+            download
+            className="mt-3 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-accent"
+          >
+            Download video directly
+          </a>
+        </div>
+      ) : null}
       <video
         ref={videoRef}
         src={src}
         poster={poster}
-        className="size-full w-full max-h-[70vh] bg-black"
+        className={cn("size-full w-full max-h-[70vh] bg-black", videoError && "hidden")}
         playsInline
         preload="auto"
+        controls={false}
+        onError={(e) => {
+          const err = e.currentTarget.error;
+          if (err) {
+            console.warn("Video playback error code:", err.code, err.message);
+            // Don't immediately break if it was just an empty initial src or aborted
+            if (src && err.code !== 1) {
+              setVideoError("The video file could not be decoded by the browser media engine.");
+            }
+          }
+        }}
         onClick={togglePlay}
       />
       {/* Controls */}

@@ -159,8 +159,9 @@ function RecordPage() {
       ? baseElapsedRef.current
       : baseElapsedRef.current + (Date.now() - startedAtRef.current) / 1000;
     setDuration(total);
+
     // MediaRecorder.mimeType on the instance gives the exact actual recording format
-    const actualMime = recorderRef.current?.mimeType || chosenMimeRef.current;
+    let actualMime = recorderRef.current?.mimeType || chosenMimeRef.current || "video/webm";
     chosenMimeRef.current = actualMime;
     const finalBlob = new Blob(chunksRef.current, { type: actualMime });
     blobRef.current = finalBlob;
