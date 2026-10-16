@@ -18,10 +18,12 @@ import {
   getCameraStream,
   getScreenStream,
   pickMimeType,
+  validateRecordingBlob,
   type RecordingStreams,
 } from "@/lib/media";
 import { extFromMime, sourceTypeLabel } from "@/lib/format";
-import { saveRecording, persistVideoMeta } from "@/lib/storage-client";
+import { persistVideoMeta } from "@/lib/storage-client";
+import { finalizeAndSaveRecording } from "@/lib/recording-save";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { SourceType, VideoRecord } from "@/lib/types";
@@ -83,10 +85,16 @@ function RecordPage() {
   const startedAtRef = useRef<number>(0);
   const baseElapsedRef = useRef<number>(0);
   const pausedRef = useRef<boolean>(false);
-  // Guards the stop/finalize flow so onstop + safety net + onerror can never
-  // double-fire, and the UI can never hang on "Finalizing…".
+  // Guards the stop/finalize flow so onstop + safety net can never double-fire,
+  // and the UI can never hang on "Finalizing…". This is the SINGLE point that
+  // builds and saves the final blob — onstop is authoritative.
+  const finalizeStartedRef = useRef<boolean>(false);
   const stopRequestedRef = useRef<boolean>(false);
   const safetyTimerRef = useRef<number | null>(null);
+  // Records a MediaRecorder error so onstop can decide whether the captured
+  // data is salvageable. onerror itself never finalizes — that was the bug
+  // that saved incomplete recordings as valid.
+  const recorderErrorRef = useRef<string | null>(null);
 
   // Hidden <video> elements MUST be in the DOM or browsers won't decode and
   // the composite "both" recording is a static frame. They're also used to
@@ -143,13 +151,12 @@ function RecordPage() {
     }
   }
 
-  // Build the blob from whatever chunks we have and run the save. Called from
-  // onstop normally, but also from the safety-net timer / onerror so the UI
-  // can never hang on "Finalizing…". Idempotent: stopRequestedRef prevents a
-  // double-fire if onstop and the safety net both run.
-  function finalizeFromChunks(_reason: "onstop" | "safety" | "error") {
-    if (stopRequestedRef.current) return;
-    stopRequestedRef.current = true;
+  // SINGLE authoritative finalize path, called only from onstop. The safety
+  // net never builds a blob — it only calls rec.stop() so onstop fires. onerror
+  // never finalizes — it records the error and lets onstop complete. Idempotent.
+  function finalizeFromChunks(_reason: "onstop") {
+    if (finalizeStartedRef.current) return;
+    finalizeStartedRef.current = true;
     if (safetyTimerRef.current) {
       clearTimeout(safetyTimerRef.current);
       safetyTimerRef.current = null;
@@ -161,9 +168,27 @@ function RecordPage() {
     setDuration(total);
 
     // MediaRecorder.mimeType on the instance gives the exact actual recording format
-    let actualMime = recorderRef.current?.mimeType || chosenMimeRef.current || "video/webm";
+    const actualMime = recorderRef.current?.mimeType || chosenMimeRef.current || "video/webm";
     chosenMimeRef.current = actualMime;
+    const chunkCount = chunksRef.current.length;
     const finalBlob = new Blob(chunksRef.current, { type: actualMime });
+    console.info("[record] finalize", {
+      mime: actualMime,
+      chunkCount,
+      blobSize: finalBlob.size,
+      hadError: Boolean(recorderErrorRef.current),
+    });
+    const validation = validateRecordingBlob(finalBlob, actualMime, chunkCount);
+    if (!validation.ok) {
+      stopAllStreams();
+      setError(
+        recorderErrorRef.current
+          ? `Recording failed: ${recorderErrorRef.current}`
+          : validation.reason,
+      );
+      setPhase("idle");
+      return;
+    }
     blobRef.current = finalBlob;
     setPreviewUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
@@ -187,42 +212,26 @@ function RecordPage() {
   // the recording. The old flow left it on a "Save to library" button.
   async function finalizeAndSave(finalBlob: Blob, totalSeconds: number, thumbData: string) {
     setPhase("saving");
-    const id = crypto.randomUUID();
     const mimeType = chosenMimeRef.current;
-    const ext = extFromMime(mimeType);
-    const record: VideoRecord = {
-      id,
-      title: `Recording ${new Date().toLocaleString()}`,
-      description: "",
-      author: author.trim() || "You",
+    const result = await finalizeAndSaveRecording(
+      finalBlob,
       mimeType,
-      ext,
-      duration: Math.round(totalSeconds),
-      size: finalBlob.size,
-      sourceType: source,
-      thumbnail: thumbData,
-      folderId: null,
-      views: 0,
-      createdAt: Date.now(),
-      storagePath: `videos/${id}.${ext}`,
-    };
-
-    try {
-      const result = await saveRecording(record, finalBlob);
-      qc.invalidateQueries({ queryKey: ["videos"] });
-      qc.invalidateQueries({ queryKey: ["storage-status"] });
-      setSavedLocalOnly(result.localOnly);
-      setSaveMsg(result.localOnly ? "Saved locally (Cloud not reachable)" : "Saved to Cloud");
-      setSavedId(id);
-      toast.success(result.localOnly ? "Saved locally" : "Recording saved");
-    } catch {
-      setSavedLocalOnly(true);
-      setSaveMsg("Save failed — kept locally");
-      setSavedId(id);
-      toast.error("Save failed — kept locally");
-    } finally {
-      setPhase("stopped");
+      chunksRef.current.length,
+      totalSeconds,
+      { source, author, thumbData },
+    );
+    if (!result.ok || !result.record) {
+      setError(result.reason ?? "Recording could not be saved.");
+      setPhase("idle");
+      return;
     }
+    qc.invalidateQueries({ queryKey: ["videos"] });
+    qc.invalidateQueries({ queryKey: ["storage-status"] });
+    setSavedLocalOnly(Boolean(result.localOnly));
+    setSaveMsg(result.localOnly ? "Saved locally (Cloud not reachable)" : "Saved to Cloud");
+    setSavedId(result.record.id);
+    toast.success(result.localOnly ? "Saved locally" : "Recording saved");
+    setPhase("stopped");
   }
 
   async function startRecording() {
@@ -230,6 +239,8 @@ function RecordPage() {
     chunksRef.current = [];
     blobRef.current = null;
     stopRequestedRef.current = false;
+    finalizeStartedRef.current = false;
+    recorderErrorRef.current = null;
     if (safetyTimerRef.current) {
       clearTimeout(safetyTimerRef.current);
       safetyTimerRef.current = null;
@@ -321,15 +332,46 @@ function RecordPage() {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       rec.onerror = (e) => {
-        // A recorder error must still finalize so the UI doesn't hang.
-        console.warn("MediaRecorder error", e);
-        finalizeFromChunks("error");
+        // Record the error but do NOT finalize here. onerror can fire before
+        // the recorder has flushed its final dataavailable chunk, so building
+        // the blob now would save an incomplete recording. We let onstop
+        // (which always fires after the final flush) be authoritative, and
+        // the validation there decides whether the captured data is usable.
+        const err = (e as unknown as { error?: Error }).error;
+        recorderErrorRef.current = err?.message ?? "Recorder error";
+        console.warn("[record] MediaRecorder error", recorderErrorRef.current);
+        // If the recorder is still active, stop it so onstop can finalize.
+        if (rec.state !== "inactive") {
+          try {
+            rec.stop();
+          } catch {
+            /* already stopping */
+          }
+        }
       };
       rec.onstop = () => {
-        // Canonical finalize path. stop() always fires this; the safety net
-        // is only a fallback if it somehow doesn't.
+        // Canonical finalize path. stop() always fires this AFTER the final
+        // dataavailable chunk; the safety net only calls stop() as a fallback.
         finalizeFromChunks("onstop");
       };
+      // When the user clicks the browser's native "Stop sharing" bar, the
+      // screen track ends. Treat that as a graceful stop, not an error.
+      combined.getTracks().forEach((t) => {
+        t.addEventListener("ended", () => {
+          console.info("[record] track ended, stopping gracefully");
+          if (
+            recorderRef.current &&
+            recorderRef.current.state !== "inactive" &&
+            !finalizeStartedRef.current
+          ) {
+            try {
+              recorderRef.current.stop();
+            } catch {
+              /* ignore */
+            }
+          }
+        });
+      });
       rec.start(1000);
       startedAtRef.current = Date.now();
       setPhase("recording");
@@ -363,20 +405,35 @@ function RecordPage() {
   // first: stop() already flushes a final dataavailable chunk, and calling
   // requestData() immediately before stop() races in Chrome and can suppress
   // the stop event — that was the bug where the UI hung on "Finalizing…".
-  // A safety-net timer forces finalize if onstop doesn't fire in 3.5s.
+  // The safety net only re-calls stop() (never builds a blob) if onstop
+  // hasn't fired in 5s, so a stalled transport can't hang the UI.
   function stopRecording() {
     const rec = recorderRef.current;
     if (!rec || rec.state === "inactive") return;
     if (stopRequestedRef.current) return;
+    stopRequestedRef.current = true;
     setPhase("finalizing");
-    stopRequestedRef.current = false; // reset; finalizeFromChunks sets it true
     safetyTimerRef.current = window.setTimeout(() => {
-      if (!stopRequestedRef.current) finalizeFromChunks("safety");
-    }, 3500);
+      // onstop didn't fire in time — nudge stop() again; onstop is still the
+      // only path that builds the blob. If the recorder is already inactive,
+      // call finalize directly as a last resort.
+      if (!finalizeStartedRef.current) {
+        console.warn("[record] safety net firing");
+        if (recorderRef.current && recorderRef.current.state !== "inactive") {
+          try {
+            recorderRef.current.stop();
+          } catch {
+            /* ignore */
+          }
+        } else {
+          finalizeFromChunks("onstop");
+        }
+      }
+    }, 5000);
     try {
       rec.stop();
     } catch {
-      finalizeFromChunks("error");
+      if (!finalizeStartedRef.current) finalizeFromChunks("onstop");
     }
   }
 
@@ -410,6 +467,9 @@ function RecordPage() {
     setPhase("idle");
     setPreviewUrl(null);
     blobRef.current = null;
+    finalizeStartedRef.current = false;
+    stopRequestedRef.current = false;
+    recorderErrorRef.current = null;
     setSavedId(null);
     setSaveMsg(null);
     setTitle("");

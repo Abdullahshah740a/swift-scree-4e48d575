@@ -80,3 +80,60 @@ export function captureThumb(video: HTMLVideoElement): string {
 export function sourceTypeLabel(t: SourceType): string {
   return t === "screen" ? "Screen" : t === "camera" ? "Camera" : "Screen + Cam";
 }
+
+/**
+ * Validate that a finalized recording blob is plausible before treating it as
+ * a playable recording. A zero-size blob or one built from no chunks is not a
+ * real recording — saving it as valid is what produced unplayable "videos".
+ */
+export function validateRecordingBlob(
+  blob: Blob,
+  mime: string,
+  chunkCount: number,
+): { ok: boolean; reason: string } {
+  if (chunkCount === 0) {
+    return { ok: false, reason: "No media data was captured (0 chunks)." };
+  }
+  if (!blob || blob.size === 0) {
+    return { ok: false, reason: "Recorded blob is empty (0 bytes)." };
+  }
+  if (!mime || !mime.startsWith("video/")) {
+    return { ok: false, reason: `Unsupported recording MIME type: ${mime}` };
+  }
+  // A real screen recording is at least tens of KB; anything tiny is almost
+  // certainly a single static frame / truncated capture.
+  if (blob.size < 1024) {
+    return { ok: false, reason: `Recording too small (${blob.size} bytes) to be valid.` };
+  }
+  return { ok: true, reason: "" };
+}
+
+/**
+ * Best-effort check that the browser's media engine can actually decode the
+ * finalized blob. This catches truncated/corrupt WebM output before we tell
+ * the user the recording is playable. Never blocks longer than `timeoutMs`;
+ * a timeout resolves `false` (treated as "could not verify") rather than
+ * hanging the save flow.
+ */
+export function canDecodeBlob(blob: Blob, timeoutMs = 6000): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (typeof document === "undefined") return resolve(false);
+    let settled = false;
+    const url = URL.createObjectURL(blob);
+    const v = document.createElement("video");
+    v.muted = true;
+    v.preload = "auto";
+    v.playsInline = true;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      URL.revokeObjectURL(url);
+      resolve(ok);
+    };
+    v.onloadeddata = () => done(true);
+    v.oncanplay = () => done(true);
+    v.onerror = () => done(false);
+    setTimeout(() => done(false), timeoutMs);
+    v.src = url;
+  });
+}
