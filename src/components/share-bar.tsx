@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link as LinkIcon, Code2, Download, Check, Clipboard } from "lucide-react";
+import { Link as LinkIcon, Code2, Download, Check, Clipboard, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 export function ShareBar({
@@ -7,11 +7,13 @@ export function ShareBar({
   title,
   mimeType,
   ext,
+  onDelete,
 }: {
   videoId: string;
   title: string;
   mimeType: string;
   ext: string;
+  onDelete?: (() => void) | undefined;
 }) {
   const [copied, setCopied] = useState<"link" | "embed" | null>(null);
 
@@ -55,6 +57,16 @@ export function ShareBar({
       >
         <Download className="size-4" /> Download
       </a>
+      {onDelete ? (
+        <button
+          type="button"
+          onClick={onDelete}
+          className="inline-flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-sm font-semibold text-destructive transition-colors hover:bg-destructive hover:text-destructive-foreground"
+          title="Delete recording"
+        >
+          <Trash2 className="size-4" /> Delete
+        </button>
+      ) : null}
       <span className="ml-auto hidden items-center gap-1 text-xs text-muted-foreground sm:inline-flex">
         <Clipboard className="size-3.5" /> {mimeType}
       </span>

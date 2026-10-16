@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Loader2, Eye, Clock, User } from "lucide-react";
 import type { Comment, Reaction, Transcript } from "@/lib/types";
@@ -10,6 +11,7 @@ import {
   persistComments,
   persistReactions,
   persistTranscript,
+  removeRecording,
   resolveVideoUrl,
 } from "@/lib/storage-client";
 import { transcribeVideo } from "@/lib/transcript";
@@ -32,6 +34,7 @@ export function WatchContent({
   authorName?: string;
 }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const playerRef = useRef<VideoPlayerHandle>(null);
   const [current, setCurrent] = useState(0);
   const [url, setUrl] = useState<string | null>(null);
@@ -110,6 +113,23 @@ export function WatchContent({
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["reactions", videoId] }),
   });
+
+  const [deleting, setDeleting] = useState(false);
+  const handleDelete = useCallback(async () => {
+    if (!video.data) return;
+    const confirmed = window.confirm("Are you sure you want to delete this recording?");
+    if (!confirmed) return;
+    setDeleting(true);
+    try {
+      await removeRecording(video.data.id, video.data.ext);
+      qc.invalidateQueries({ queryKey: ["videos"] });
+      toast.success("Recording deleted");
+      navigate({ to: "/" });
+    } catch {
+      toast.error("Failed to delete recording");
+      setDeleting(false);
+    }
+  }, [navigate, qc, video.data]);
 
   const [genState, setGenState] = useState<{
     generating: boolean;
@@ -224,7 +244,13 @@ export function WatchContent({
               <p className="mt-3 text-sm text-muted-foreground">{rec.description}</p>
             ) : null}
           </div>
-          <ShareBar videoId={rec.id} title={rec.title} mimeType={rec.mimeType} ext={rec.ext} />
+          <ShareBar
+            videoId={rec.id}
+            title={rec.title}
+            mimeType={rec.mimeType}
+            ext={rec.ext}
+            onDelete={chromeless ? undefined : handleDelete}
+          />
 
           {showTabs ? (
             <div className="mt-2 grid gap-4 lg:grid-cols-2">

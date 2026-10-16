@@ -31,8 +31,8 @@ export function VideoCard({
   return (
     <div
       className={cn(
-        "group overflow-hidden rounded-xl border border-border/60 bg-card/70 transition-colors hover:border-primary/40",
-        compact && "flex items-center gap-3",
+        "group relative rounded-xl border border-border/60 bg-card/70 transition-colors hover:border-primary/40",
+        compact ? "flex items-center gap-3 pr-2" : "overflow-hidden",
       )}
     >
       <Link
@@ -124,17 +124,17 @@ function CardMenu({
   compact?: boolean;
 }) {
   return (
-    <div className={cn("relative", compact ? "" : "")}>
+    <div className="relative shrink-0">
       <details className="group/menu">
         <summary
           className={cn(
-            "flex size-7 cursor-pointer list-none items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/20 hover:text-foreground",
+            "flex size-8 cursor-pointer list-none items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent/30 hover:text-foreground active:scale-95",
           )}
           aria-label="More actions"
         >
           <MoreVertical className="size-4" />
         </summary>
-        <div className="absolute right-0 top-full z-20 mt-1 w-44 rounded-lg border border-border bg-popover p-1 text-sm shadow-xl">
+        <div className="absolute right-0 top-full z-50 mt-1 w-48 rounded-xl border border-border bg-popover p-1.5 text-sm shadow-2xl backdrop-blur-md">
           {onMove ? (
             <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               Move to folder
@@ -142,30 +142,42 @@ function CardMenu({
           ) : null}
           {onMove ? (
             <button
-              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-foreground hover:bg-accent/20"
-              onClick={() => onMove(video, null)}
+              type="button"
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-accent/30 transition-colors"
+              onClick={(e) => {
+                e.stopPropagation();
+                onMove(video, null);
+              }}
             >
-              <FolderInput className="size-3.5" /> No folder
+              <FolderInput className="size-3.5 text-muted-foreground" /> No folder
             </button>
           ) : null}
           {onMove &&
             folders.map((f) => (
               <button
                 key={f.id}
-                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-foreground hover:bg-accent/20"
-                onClick={() => onMove(video, f.id)}
+                type="button"
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-accent/30 transition-colors"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onMove(video, f.id);
+                }}
               >
-                <FolderInput className="size-3.5" /> {f.name}
+                <FolderInput className="size-3.5 text-muted-foreground" /> {f.name}
               </button>
             ))}
           {onDelete ? (
             <>
-              <div className="my-1 h-px bg-border" />
+              {onMove ? <div className="my-1.5 h-px bg-border/60" /> : null}
               <button
-                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-destructive hover:bg-destructive/10"
-                onClick={() => onDelete(video)}
+                type="button"
+                className="flex w-full items-center gap-2 rounded-lg bg-destructive/15 px-2.5 py-2 text-left text-xs font-semibold text-destructive hover:bg-destructive hover:text-destructive-foreground transition-colors"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(video);
+                }}
               >
-                <Trash2 className="size-3.5" /> Delete
+                <Trash2 className="size-4 shrink-0 text-current" /> Delete recording
               </button>
             </>
           ) : null}
