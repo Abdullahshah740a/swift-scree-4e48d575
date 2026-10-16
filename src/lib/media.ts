@@ -1,4 +1,5 @@
 import type { SourceType } from "./types";
+// sourceTypeLabel lives in ./format now; media.ts is browser capture only.
 
 /**
  * Choose a MediaRecorder mimeType the browser supports, preferring MP4

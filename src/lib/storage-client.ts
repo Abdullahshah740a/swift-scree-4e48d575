@@ -107,6 +107,16 @@ export async function saveRecording(
   }
 }
 
+/** Update a recording's metadata (e.g. edited title/description). */
+export async function persistVideoMeta(record: VideoRecord): Promise<void> {
+  await safeCall(saveVideoMetaFn({ data: { record } }), undefined);
+  try {
+    await putVideoMeta(record);
+  } catch {
+    /* local cache best-effort */
+  }
+}
+
 export async function removeRecording(id: string, ext: string): Promise<void> {
   await safeCall(deleteVideoFn({ data: { id, ext } }), undefined);
   try {

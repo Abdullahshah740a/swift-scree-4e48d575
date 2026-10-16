@@ -11,20 +11,20 @@ import {
   Check,
   Loader2,
   AlertTriangle,
+  RefreshCw,
 } from "lucide-react";
 import {
   captureThumb,
   getCameraStream,
   getScreenStream,
   pickMimeType,
-  sourceTypeLabel,
   type RecordingStreams,
 } from "@/lib/media";
-import { extFromMime } from "@/lib/format";
-import { saveRecording } from "@/lib/storage-client";
+import { extFromMime, sourceTypeLabel } from "@/lib/format";
+import { saveRecording, persistVideoMeta } from "@/lib/storage-client";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import type { SourceType } from "@/lib/types";
+import type { SourceType, VideoRecord } from "@/lib/types";
 
 export const Route = createFileRoute("/record")({
   head: () => ({
@@ -46,7 +46,7 @@ export const Route = createFileRoute("/record")({
   component: RecordPage,
 });
 
-type Phase = "idle" | "recording" | "stopped" | "saving";
+type Phase = "idle" | "recording" | "finalizing" | "saving" | "stopped";
 
 function RecordPage() {
   const navigate = useNavigate();
@@ -57,13 +57,14 @@ function RecordPage() {
   const [error, setError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [blob, setBlob] = useState<Blob | null>(null);
   const [thumb, setThumb] = useState<string>("");
   const [duration, setDuration] = useState(0);
   const [title, setTitle] = useState("");
   const [author, setAuthor] = useState("");
   const [desc, setDesc] = useState("");
   const [savedId, setSavedId] = useState<string | null>(null);
+  const [savedLocalOnly, setSavedLocalOnly] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
@@ -74,9 +75,11 @@ function RecordPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
+  const chosenMimeRef = useRef<string>("video/webm");
+  // The blob built in onstop, kept in a ref so the async save reads the
+  // finalized value without depending on state that hasn't committed yet.
+  const blobRef = useRef<Blob | null>(null);
   // Elapsed-time bookkeeping that survives pause/resume.
-  // startedAtRef = ms timestamp the current running segment began.
-  // baseElapsedRef = seconds accumulated during prior running segments.
   const startedAtRef = useRef<number>(0);
   const baseElapsedRef = useRef<number>(0);
   const pausedRef = useRef<boolean>(false);
@@ -132,15 +135,58 @@ function RecordPage() {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
   }
 
+  // Called directly from onstop — this is what makes Stop actually persist
+  // the recording. The old flow left it on a "Save to library" button.
+  async function finalizeAndSave(finalBlob: Blob, totalSeconds: number, thumbData: string) {
+    setPhase("saving");
+    const id = crypto.randomUUID();
+    const mimeType = chosenMimeRef.current;
+    const ext = extFromMime(mimeType);
+    const record: VideoRecord = {
+      id,
+      title: `Recording ${new Date().toLocaleString()}`,
+      description: "",
+      author: author.trim() || "You",
+      mimeType,
+      ext,
+      duration: Math.round(totalSeconds),
+      size: finalBlob.size,
+      sourceType: source,
+      thumbnail: thumbData,
+      folderId: null,
+      views: 0,
+      createdAt: Date.now(),
+      storagePath: `videos/${id}.${ext}`,
+    };
+
+    try {
+      const result = await saveRecording(record, finalBlob);
+      qc.invalidateQueries({ queryKey: ["videos"] });
+      qc.invalidateQueries({ queryKey: ["storage-status"] });
+      setSavedLocalOnly(result.localOnly);
+      setSaveMsg(result.localOnly ? "Saved locally (Cloud not reachable)" : "Saved to Cloud");
+      setSavedId(id);
+      toast.success(result.localOnly ? "Saved locally" : "Recording saved");
+    } catch {
+      setSavedLocalOnly(true);
+      setSaveMsg("Save failed — kept locally");
+      setSavedId(id);
+      toast.error("Save failed — kept locally");
+    } finally {
+      setPhase("stopped");
+    }
+  }
+
   async function startRecording() {
     setError(null);
     chunksRef.current = [];
-    setBlob(null);
-    setPreviewUrl(null);
+    blobRef.current = null;
     setThumb("");
     setDuration(0);
     setElapsed(0);
     setPaused(false);
+    setSavedId(null);
+    setSaveMsg(null);
     pausedRef.current = false;
     baseElapsedRef.current = 0;
 
@@ -212,6 +258,7 @@ function RecordPage() {
 
       streamRef.current = combined;
       const { mimeType } = pickMimeType();
+      chosenMimeRef.current = mimeType;
       const rec = new MediaRecorder(combined, {
         mimeType,
         videoBitsPerSecond: 4_000_000,
@@ -226,19 +273,24 @@ function RecordPage() {
           ? baseElapsedRef.current
           : baseElapsedRef.current + (Date.now() - startedAtRef.current) / 1000;
         setDuration(total);
-        const finalBlob = new Blob(chunksRef.current, { type: mimeType });
-        setBlob(finalBlob);
+        const finalBlob = new Blob(chunksRef.current, { type: chosenMimeRef.current });
+        blobRef.current = finalBlob;
         setPreviewUrl(URL.createObjectURL(finalBlob));
-        // Thumbnail is best-effort: a failure here must NOT block the
-        // stopped transition (that was the "Stop button does nothing" bug).
+        // Thumbnail is best-effort: a failure here must NOT block the stop
+        // flow (that was the original "Stop button does nothing" bug).
+        let thumbData = "";
         try {
           const thumbEl = source === "camera" ? camVideoRef.current : screenVideoRef.current;
-          if (thumbEl) setThumb(captureThumb(thumbEl));
+          if (thumbEl) {
+            thumbData = captureThumb(thumbEl);
+            setThumb(thumbData);
+          }
         } catch {
           /* thumbnail optional */
         }
         stopAllStreams();
-        setPhase("stopped");
+        // Persist immediately — Stop should save, not just preview.
+        void finalizeAndSave(finalBlob, total, thumbData);
       };
       rec.start(1000);
       startedAtRef.current = Date.now();
@@ -269,54 +321,61 @@ function RecordPage() {
     setPaused(false);
   }
 
+  // requestData() forces a final dataavailable chunk so the last second of
+  // footage flushes before stop; then stop() fires onstop which saves.
   function stopRecording() {
-    recorderRef.current?.stop();
+    const rec = recorderRef.current;
+    if (!rec || rec.state === "inactive") return;
+    setPhase("finalizing");
+    try {
+      rec.requestData();
+    } catch {
+      /* some browsers throw if already stopping */
+    }
+    rec.stop();
   }
 
-  async function save() {
-    if (!blob) return;
-    setPhase("saving");
-    const id = crypto.randomUUID();
-    const { mimeType } = pickMimeType();
+  async function updateDetails() {
+    if (!savedId) return;
+    const mimeType = chosenMimeRef.current;
     const ext = extFromMime(mimeType);
-    const record = {
-      id,
+    const record: VideoRecord = {
+      id: savedId,
       title: title.trim() || `Recording ${new Date().toLocaleString()}`,
       description: desc.trim(),
       author: author.trim() || "You",
       mimeType,
       ext,
       duration: Math.round(duration),
-      size: blob.size,
+      size: blobRef.current?.size ?? 0,
       sourceType: source,
       thumbnail: thumb,
       folderId: null,
       views: 0,
       createdAt: Date.now(),
-      storagePath: `videos/${id}.${ext}`,
+      storagePath: `videos/${savedId}.${ext}`,
     };
+    await persistVideoMeta(record);
+    qc.invalidateQueries({ queryKey: ["videos"] });
+    toast.success("Details updated");
+  }
 
-    try {
-      const result = await saveRecording(record, blob);
-      qc.invalidateQueries({ queryKey: ["videos"] });
-      qc.invalidateQueries({ queryKey: ["storage-status"] });
-      if (result.localOnly) {
-        toast.success("Saved locally (Cloud not configured)");
-      } else {
-        toast.success("Recording saved to Cloud");
-      }
-      setSavedId(id);
-    } catch {
-      toast.error("Save failed — kept locally");
-      setSavedId(id);
-    }
+  function resetToIdle() {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPhase("idle");
+    setPreviewUrl(null);
+    blobRef.current = null;
+    setSavedId(null);
+    setSaveMsg(null);
+    setTitle("");
+    setDesc("");
   }
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-8">
       <h1 className="text-2xl font-bold tracking-tight text-foreground">New recording</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        Capture your screen, camera, or both. Saved to the shared library.
+        Capture your screen, camera, or both. Stop saves automatically to the shared library.
       </p>
 
       {error ? (
@@ -420,18 +479,56 @@ function RecordPage() {
         </div>
       ) : null}
 
-      {(phase === "stopped" || phase === "saving") && previewUrl ? (
+      {phase === "finalizing" ? (
+        <div className="mt-6 flex items-center gap-3 rounded-xl border border-border/60 bg-card px-4 py-6 text-sm text-muted-foreground">
+          <Loader2 className="size-5 animate-spin text-primary" />
+          Finalizing your recording…
+        </div>
+      ) : null}
+
+      {phase === "saving" && previewUrl ? (
         <div className="mt-6 flex flex-col gap-4">
           <div className="overflow-hidden rounded-xl border border-border/60 bg-black">
             <video src={previewUrl} controls className="size-full max-h-[480px] w-full" />
           </div>
+          <div className="flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/10 px-4 py-3 text-sm text-foreground">
+            <Loader2 className="size-4 animate-spin text-primary" />
+            Saving to library…
+          </div>
+        </div>
+      ) : null}
+
+      {phase === "stopped" && previewUrl ? (
+        <div className="mt-6 flex flex-col gap-4">
+          <div className="overflow-hidden rounded-xl border border-border/60 bg-black">
+            <video src={previewUrl} controls className="size-full max-h-[480px] w-full" />
+          </div>
+
+          {saveMsg ? (
+            <div className="flex items-center gap-2 rounded-lg border border-success/40 bg-success/10 px-4 py-3 text-sm text-foreground">
+              <Check className="size-4 text-success" />
+              {saveMsg}
+              {savedId ? (
+                <button
+                  onClick={() => {
+                    qc.invalidateQueries({ queryKey: ["videos"] });
+                    navigate({ to: "/watch/$id", params: { id: savedId } });
+                  }}
+                  className="ml-auto text-primary hover:underline"
+                >
+                  Watch →
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium text-foreground">Title</label>
               <input
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="Recording title"
+                placeholder={`Recording ${new Date().toLocaleString()}`}
                 className="rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
               <label className="mt-1 text-sm font-medium text-foreground">Description</label>
@@ -445,49 +542,26 @@ function RecordPage() {
             </div>
             <div className="flex flex-col justify-end gap-3">
               <p className="text-xs text-muted-foreground">
-                {sourceTypeLabel(source)} · {Math.round(duration)}s ·{savedId ? " saved" : ""}
+                {sourceTypeLabel(source)} · {Math.round(duration)}s ·{" "}
+                {savedLocalOnly ? "local only" : "synced"}
               </p>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <button
-                  onClick={save}
-                  disabled={phase === "saving"}
+                  onClick={updateDetails}
+                  disabled={!savedId}
                   className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
                 >
-                  {phase === "saving" ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : (
-                    <Check className="size-4" />
-                  )}
-                  Save to library
+                  <Check className="size-4" /> Update details
                 </button>
-                <Link
-                  to="/record"
-                  onClick={() => {
-                    setPhase("idle");
-                    setBlob(null);
-                    setPreviewUrl(null);
-                  }}
+                <button
+                  onClick={resetToIdle}
                   className="inline-flex items-center gap-2 rounded-lg border border-input bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent"
                 >
-                  Discard
-                </Link>
+                  <RefreshCw className="size-4" /> New recording
+                </button>
               </div>
             </div>
           </div>
-          {savedId ? (
-            <div className="flex items-center gap-2 rounded-lg border border-success/40 bg-success/10 px-4 py-3 text-sm text-foreground">
-              <Check className="size-4 text-success" /> Saved.
-              <button
-                onClick={() => {
-                  qc.invalidateQueries({ queryKey: ["videos"] });
-                  navigate({ to: "/watch/$id", params: { id: savedId } });
-                }}
-                className="ml-auto text-primary hover:underline"
-              >
-                Watch →
-              </button>
-            </div>
-          ) : null}
         </div>
       ) : null}
     </div>
