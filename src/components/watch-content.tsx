@@ -35,6 +35,7 @@ export function WatchContent({
   const playerRef = useRef<VideoPlayerHandle>(null);
   const [current, setCurrent] = useState(0);
   const [url, setUrl] = useState<string | null>(null);
+  const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
   const [urlError, setUrlError] = useState<string | null>(null);
 
   const video = useQuery({
@@ -59,10 +60,14 @@ export function WatchContent({
     setUrl(null);
     setUrlError(null);
     resolveVideoUrl(videoId)
-      .then((u) => {
-        if (u) {
-          setUrl(u);
-          revoke = u;
+      .then(({ primary, fallback }) => {
+        if (primary) {
+          setUrl(primary);
+          revoke = primary;
+          setFallbackUrl(fallback);
+        } else if (fallback) {
+          setUrl(fallback);
+          setFallbackUrl(null);
         } else {
           setUrlError("No video file available for this recording.");
         }
@@ -200,6 +205,7 @@ export function WatchContent({
           <VideoPlayer
             ref={playerRef}
             src={url ?? ""}
+            fallbackSrc={fallbackUrl ?? undefined}
             poster={rec.thumbnail}
             comments={comments.data ?? []}
             reactions={reactions.data ?? []}

@@ -127,12 +127,23 @@ export async function removeRecording(id: string, ext: string): Promise<void> {
   }
 }
 
-/** Resolve a playable object URL for a video (local blob first, then remote). */
-export async function resolveVideoUrl(id: string): Promise<string | null> {
+/**
+ * Resolve playable URLs for a video. Returns the local IndexedDB blob URL
+ * (instant, offline) when available, plus the remote streaming URL as a
+ * fallback. The player tries the local URL first and falls back to remote
+ * if the blob won't decode — a stale/corrupt local cache must never block
+ * playback of a valid remote recording.
+ */
+export async function resolveVideoUrl(
+  id: string,
+): Promise<{ primary: string | null; fallback: string | null }> {
+  const remote = `/api/video/${id}`;
   const local = await safeCall(getBlob(id), null);
-  if (local) return URL.createObjectURL(local);
+  if (local) {
+    return { primary: URL.createObjectURL(local), fallback: remote };
+  }
   const rec = await fetchVideoMeta(id);
-  return rec?.storagePath ? `/api/video/${id}` : null;
+  return { primary: rec?.storagePath ? remote : null, fallback: null };
 }
 
 function blobToBase64(blob: Blob): Promise<string> {

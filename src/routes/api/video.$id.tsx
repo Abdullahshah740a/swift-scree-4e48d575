@@ -1,9 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { getVideoMeta as getVideoMetaServer } from "@/lib/storage.server";
 
-// Public, anonymous video proxy: streams the stored blob for the public
-// viewer and watch page. Reads from Supabase Storage using the service role.
-// No auth on this edge route by design (share links are public).
+// Public, anonymous video endpoint for the watch page and chromeless share
+// viewer. Instead of buffering the whole file through the Edge worker (which
+// advertises Accept-Ranges but can't honor Range requests, so Chrome/Firefox
+// refuse to play WebM with "No video with supported format and MIME type"),
+// we create a short-lived signed URL for the private object and 302-redirect
+// the browser to Cloud Storage's CDN. The CDN serves the file with full
+// streaming + byte-range support, so <video> decodes it reliably.
 
 export const Route = createFileRoute("/api/video/$id")({
   server: {
@@ -20,34 +24,41 @@ export const Route = createFileRoute("/api/video/$id")({
         if (!url || !key || !bucket) {
           return new Response("Storage not configured", { status: 502 });
         }
-        const path = `videos/${rec.id}.${rec.ext}`;
-        const remote = `${url}/storage/v1/object/${encodeURIComponent(bucket)}/${encodeURIComponent(path)}`;
+
+        const objectPath = `videos/${rec.id}.${rec.ext}`;
+        // Create a signed URL (1 hour). The bucket name may contain spaces, so
+        // encode it in the path. The object path segments are encoded too.
+        const signPath = `/storage/v1/object/sign/${encodeURIComponent(bucket)}/${encodeURIComponent(objectPath)}`;
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 12000);
+        const timer = setTimeout(() => controller.abort(), 9000);
         try {
-          const res = await fetch(remote, {
+          const res = await fetch(`${url}${signPath}`, {
+            method: "POST",
             signal: controller.signal,
-            headers: { apikey: key, Authorization: `Bearer ${key}` },
-          });
-          if (!res.ok) return new Response("Video missing", { status: 502 });
-          const arrayBuf = await res.arrayBuffer();
-
-          // Ensure mime type without strict codec parameters that browsers like Chrome/Firefox
-          // reject with "No video with supported format and MIME type found" when served via HTTP.
-          let cleanMime = rec.mimeType || "video/webm";
-          if (cleanMime.startsWith("video/mp4")) {
-            cleanMime = "video/mp4";
-          } else if (cleanMime.startsWith("video/webm")) {
-            cleanMime = "video/webm";
-          }
-
-          return new Response(arrayBuf, {
-            status: 200,
             headers: {
-              "Content-Type": cleanMime,
-              "Accept-Ranges": "bytes",
-              "Content-Length": arrayBuf.byteLength.toString(),
-              "Cache-Control": "public, max-age=3600",
+              apikey: key,
+              Authorization: `Bearer ${key}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ expiresIn: 3600 }),
+          });
+          if (!res.ok) {
+            return new Response("Video missing", { status: 502 });
+          }
+          const data = (await res.json()) as { signedURL?: string };
+          const signed = data.signedURL;
+          if (!signed) {
+            return new Response("Video missing", { status: 502 });
+          }
+          // signedURL may be relative ("/storage/v1/...") or absolute.
+          const target = signed.startsWith("http")
+            ? signed
+            : `${url}${signed.startsWith("/") ? "" : "/"}${signed}`;
+          return new Response(null, {
+            status: 302,
+            headers: {
+              Location: target,
+              "Cache-Control": "private, max-age=300",
             },
           });
         } catch {

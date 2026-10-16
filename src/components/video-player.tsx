@@ -12,6 +12,7 @@ export interface VideoPlayerHandle {
 
 interface Props {
   src: string;
+  fallbackSrc?: string | undefined;
   poster?: string;
   comments?: Comment[];
   reactions?: Reaction[];
@@ -19,7 +20,7 @@ interface Props {
 }
 
 export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
-  { src, poster, comments = [], reactions = [], onTimeUpdate },
+  { src, fallbackSrc, poster, comments = [], reactions = [], onTimeUpdate },
   ref,
 ) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -29,6 +30,17 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
   const [videoError, setVideoError] = useState<string | null>(null);
+  // When the primary src fails to decode (e.g. a stale IndexedDB blob), swap
+  // to the remote streaming URL once, then surface a real error if that also
+  // fails.
+  const [activeSrc, setActiveSrc] = useState(src);
+  const triedFallback = useRef(false);
+
+  useEffect(() => {
+    setActiveSrc(src);
+    triedFallback.current = false;
+    setVideoError(null);
+  }, [src]);
 
   useImperativeHandle(ref, () => ({
     getCurrentTime: () => videoRef.current?.currentTime ?? 0,
@@ -85,7 +97,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
           <p className="text-sm font-medium text-foreground">Playback issue</p>
           <p className="mt-1 text-xs text-muted-foreground">{videoError}</p>
           <a
-            href={src}
+            href={activeSrc}
             download
             className="mt-3 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-accent"
           >
@@ -95,7 +107,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
       ) : null}
       <video
         ref={videoRef}
-        src={src}
+        src={activeSrc}
         poster={poster}
         className={cn("size-full w-full max-h-[70vh] bg-black", videoError && "hidden")}
         playsInline
@@ -103,13 +115,18 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
         controls={false}
         onError={(e) => {
           const err = e.currentTarget.error;
-          if (err) {
-            console.warn("Video playback error code:", err.code, err.message);
-            // Don't immediately break if it was just an empty initial src or aborted
-            if (src && err.code !== 1) {
-              setVideoError("The video file could not be decoded by the browser media engine.");
-            }
+          if (!err) return;
+          console.warn("Video playback error code:", err.code, err.message);
+          // Ignore aborted loads (code 1) from src swaps.
+          if (!activeSrc || err.code === 1) return;
+          // Try the remote streaming URL once before giving up.
+          if (!triedFallback.current && fallbackSrc && fallbackSrc !== activeSrc) {
+            triedFallback.current = true;
+            setVideoError(null);
+            setActiveSrc(fallbackSrc);
+            return;
           }
+          setVideoError("The video file could not be decoded by the browser media engine.");
         }}
         onClick={togglePlay}
       />
