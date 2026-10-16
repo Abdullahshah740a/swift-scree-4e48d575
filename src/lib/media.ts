@@ -9,24 +9,37 @@ import type { SourceType } from "./types";
  * WebM — Chrome's MediaRecorder MP4 output is fragmented and often fails
  * to play back without a transcode-mux.
  */
-export function pickMimeType(): { mimeType: string; ext: string } {
+/**
+ * Choose a MediaRecorder mimeType the browser can actually ENCODE for the
+ * given stream. The codec string MUST match the stream's tracks: a video-only
+ * screen capture (no system audio) recorded with `video/webm;codecs=vp9,opus`
+ * can produce ZERO output chunks in some Chrome builds because the Opus audio
+ * codec has no source track — which is exactly the "No media data was
+ * captured (0 chunks)" failure. So when there's no audio track we pick a
+ * video-only codec string (`codecs=vp9`, no opus); when there is audio we
+ * include opus. WebM (VP9/VP8) is prioritized; MP4 is a last-resort fallback
+ * (Safari). The caller still reads `MediaRecorder.mimeType` after construction
+ * for the real container/codec actually in use.
+ */
+export function pickMimeType(hasAudio = true): { mimeType: string; ext: string } {
   if (typeof MediaRecorder === "undefined") {
     return { mimeType: "video/webm", ext: "webm" };
   }
 
-  // Prioritize webm because MediaRecorder in modern Chromium and Firefox
-  // records webm reliably with VP8/VP9 and Opus audio, and standard <video> can
-  // immediately stream and decode webm in all modern browsers.
-  // MP4 from MediaRecorder frequently produces fragmented mp4 or codecs that
-  // browsers fail to play back unless transcode-muxed.
-  const candidates: Array<{ mimeType: string; ext: string }> = [
-    { mimeType: "video/webm;codecs=vp9,opus", ext: "webm" },
-    { mimeType: "video/webm;codecs=vp8,opus", ext: "webm" },
-    { mimeType: "video/webm;codecs=h264,opus", ext: "webm" },
-    { mimeType: "video/webm", ext: "webm" },
-    { mimeType: "video/mp4;codecs=avc1,mp4a.40.2", ext: "mp4" },
-    { mimeType: "video/mp4", ext: "mp4" },
-  ];
+  // Try each video codec with (or without) an Opus audio codec depending on
+  // whether the stream actually carries audio. The bare `video/webm` entry
+  // lets the browser pick codecs itself if the explicit strings are rejected.
+  const videoCodecs = ["vp9", "vp8", "h264", ""] as const;
+  const candidates: Array<{ mimeType: string; ext: string }> = [];
+  for (const v of videoCodecs) {
+    const codec = v ? (hasAudio ? `${v},opus` : v) : "";
+    candidates.push({
+      mimeType: codec ? `video/webm;codecs=${codec}` : "video/webm",
+      ext: "webm",
+    });
+  }
+  candidates.push({ mimeType: "video/mp4;codecs=avc1,mp4a.40.2", ext: "mp4" });
+  candidates.push({ mimeType: "video/mp4", ext: "mp4" });
 
   for (const c of candidates) {
     if (MediaRecorder.isTypeSupported?.(c.mimeType)) {
@@ -34,6 +47,34 @@ export function pickMimeType(): { mimeType: string; ext: string } {
     }
   }
   return { mimeType: "video/webm", ext: "webm" };
+}
+
+/**
+ * Construct a MediaRecorder whose codec string matches the stream's actual
+ * tracks. A video-only screen capture (no audio) recorded with an Opus audio
+ * codec can produce 0 output chunks in some Chrome builds — the root cause of
+ * "No media data was captured (0 chunks)". This picks a video-only codec when
+ * there's no audio, falls back to the browser default if the preferred codec
+ * is rejected, and returns the recorder plus its real `mimeType` (always read
+ * from the instance, never assumed).
+ */
+export function createRecorder(
+  stream: MediaStream,
+  videoBitsPerSecond = 4_000_000,
+): { recorder: MediaRecorder; mimeType: string } {
+  const hasAudio = stream.getAudioTracks().length > 0;
+  const preferred = pickMimeType(hasAudio);
+  let rec: MediaRecorder;
+  try {
+    rec = new MediaRecorder(stream, { mimeType: preferred.mimeType, videoBitsPerSecond });
+  } catch {
+    try {
+      rec = new MediaRecorder(stream, { videoBitsPerSecond });
+    } catch {
+      rec = new MediaRecorder(stream);
+    }
+  }
+  return { recorder: rec, mimeType: rec.mimeType || preferred.mimeType };
 }
 
 export interface RecordingStreams {

@@ -15,9 +15,9 @@ import {
 } from "lucide-react";
 import {
   captureThumb,
+  createRecorder,
   getCameraStream,
   getScreenStream,
-  pickMimeType,
   validateRecordingBlob,
   type RecordingStreams,
 } from "@/lib/media";
@@ -321,12 +321,11 @@ function RecordPage() {
       }
 
       streamRef.current = combined;
-      const { mimeType } = pickMimeType();
+      // createRecorder matches the codec string to the stream's actual tracks
+      // (video-only codec when there's no audio) so a silent screen capture
+      // never produces 0 chunks. It returns the recorder's real mimeType.
+      const { recorder: rec, mimeType } = createRecorder(combined);
       chosenMimeRef.current = mimeType;
-      const rec = new MediaRecorder(combined, {
-        mimeType,
-        videoBitsPerSecond: 4_000_000,
-      });
       recorderRef.current = rec;
       rec.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
