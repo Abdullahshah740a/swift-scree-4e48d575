@@ -218,8 +218,8 @@ export async function createUploadUrl(
       const text = await res.text().catch(() => "");
       return { ok: false, error: `sign failed: ${res.status} ${text}` };
     }
-    const data = (await res.json()) as { signed_url?: string; url?: string };
-    const signed = data.signed_url ?? data.url;
+    const data = (await res.json()) as { signedURL?: string; signed_url?: string; url?: string };
+    const signed = data.signedURL ?? data.signed_url ?? data.url;
     if (!signed) return { ok: false, error: "No signed URL in response." };
     // signed_url may be relative ("/storage/v1/...") or absolute.
     const full = signed.startsWith("http")
