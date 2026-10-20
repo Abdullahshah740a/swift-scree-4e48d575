@@ -14,12 +14,26 @@ import type { VideoRecord } from "@/lib/types";
 // Routing the upload through the Edge worker as base64-over-RPC also fails for
 // any real recording (it exceeds the worker payload/serialization limit).
 //
-// This route receives the raw video bytes as a same-origin POST, forwards them
-// straight to Cloud Storage using the service-role key (server-side only), and
-// then persists the metadata JSON — so "Saved to Cloud" is only ever returned
-// when BOTH the video object and its metadata actually exist. The key never
-// reaches the browser, there's no CORS preflight on the app origin, and the
-// bytes are streamed (not base64-bloated, not Seroval-serialized).
+// This route receives the raw video bytes as a same-origin POST, buffers them
+// once server-side, and forwards them to Cloud Storage using the service-role
+// key (server-side only), then persists the metadata JSON — so "Saved to
+// Cloud" is only ever returned when BOTH the video object and its metadata
+// actually exist. The key never reaches the browser, there's no CORS preflight
+// on the app origin, and the bytes are buffered once (not base64-bloated, not
+// Seroval-serialized).
+//
+// WHY we buffer instead of streaming request.body: Supabase Storage's S3-style
+// object-upload endpoint does NOT finalize a chunked/transfer-encoded body —
+// streaming request.body (a ReadableStream) leaves the upstream POST hanging
+// indefinitely waiting for a Content-Length it never receives, so the server
+// fetch never resolved and the only thing that stopped it was the browser's
+// 120s AbortController ("fetch-aborted / no response"). Buffering gives fetch a
+// concrete ArrayBuffer so it sets Content-Length and Supabase completes the
+// upload. A same-origin POST to a server route is a different transport than
+// base64-over-RPC (which failed on *serialization* limits), so a few-MB
+// recording is well within the worker's request-body budget. The upstream call
+// is also bounded by its own AbortController so a stall surfaces as a 502 with
+// a real message instead of hanging until the browser aborts.
 
 function env() {
   return {
@@ -71,27 +85,40 @@ export const Route = createFileRoute("/api/upload/$id")({
         const ext = String(expectedExt).toLowerCase().endsWith("mp4") ? "mp4" : "webm";
         const objectPath = `videos/${parsed.data}.${ext}`;
 
-        // Forward the raw body to Cloud Storage with upsert so a retry of the
-        // same id replaces cleanly. The body is a ReadableStream — pipe it
-        // through without buffering the whole file into memory.
+        // Forward the body to Cloud Storage with upsert so a retry of the
+        // same id replaces cleanly. Buffer it so fetch sets Content-Length and
+        // Supabase Storage finalizes the object (see the file header for why
+        // streaming request.body hangs the S3-style upload endpoint).
         const uploadUrl = `${url}/storage/v1/object/${encodeBucket(bucket)}/${encodeURIComponent(
           objectPath,
         )}`;
 
+        const contentLength = request.headers.get("content-length");
+        let bodyBuf: ArrayBuffer;
         try {
-          log("proxy-start", { bytes: request.headers.get("content-length") });
+          bodyBuf = await request.arrayBuffer();
+        } catch (e) {
+          log("body-read-failed", { name: e instanceof Error ? e.name : "Error" });
+          return new Response("Upload failed (could not read body)", { status: 500 });
+        }
+        log("proxy-start", { bytes: contentLength, buffered: bodyBuf.byteLength });
+
+        // Bound the upstream call so a stall surfaces as a 502 here instead of
+        // hanging until the browser aborts. This is a safety net distinct from
+        // the buffering fix that addresses the underlying chunked-body hang.
+        const upstreamCtrl = new AbortController();
+        const upstreamTimer = setTimeout(() => upstreamCtrl.abort(), 90_000);
+        try {
           const uploadRes = await fetch(uploadUrl, {
             method: "POST",
+            signal: upstreamCtrl.signal,
             headers: {
               apikey: key,
               Authorization: `Bearer ${key}`,
               "Content-Type": contentType,
               "x-upsert": "true",
             },
-            body: request.body,
-            // @ts-expect-error - duplex is required for streaming request bodies
-            // in fetch but not in the TS DOM lib types yet.
-            duplex: "half",
+            body: bodyBuf,
           });
 
           if (!uploadRes.ok) {
@@ -99,10 +126,18 @@ export const Route = createFileRoute("/api/upload/$id")({
             log("storage-rejected", { status: uploadRes.status, body: text.slice(0, 200) });
             return new Response(`Upload failed (${uploadRes.status})`, { status: 502 });
           }
-          log("storage-ok", { status: uploadRes.status });
+          log("storage-ok", { status: uploadRes.status, bytes: bodyBuf.byteLength });
         } catch (e) {
-          log("storage-threw", { name: e instanceof Error ? e.name : "Error" });
-          return new Response("Upload failed (transport)", { status: 502 });
+          const name = e instanceof Error ? e.name : "Error";
+          log("storage-threw", { name });
+          return new Response(
+            name === "AbortError"
+              ? "Upload failed (upstream timeout)"
+              : "Upload failed (transport)",
+            { status: 502 },
+          );
+        } finally {
+          clearTimeout(upstreamTimer);
         }
 
         // Persist the metadata JSON. The client passes it as a query/header so
