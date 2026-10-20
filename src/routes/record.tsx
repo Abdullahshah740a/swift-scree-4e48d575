@@ -46,14 +46,17 @@ function RecordPage() {
   const [author, setAuthor] = useState("");
   const [title, setTitle] = useState("");
   const [desc, setDesc] = useState("");
+  const [justUpdated, setJustUpdated] = useState(false);
 
   const { phase } = engine;
 
   function handleStart() {
     void engine.start({ source, author });
   }
-  function handleUpdateDetails() {
-    void engine.updateDetails({ title, description: desc, source, author });
+  async function handleUpdateDetails() {
+    await engine.updateDetails({ title, description: desc, source, author });
+    setJustUpdated(true);
+    window.setTimeout(() => setJustUpdated(false), 1000);
   }
   function handleNewOrReset() {
     if (phase === "stopped" && engine.savedId) {
@@ -261,9 +264,12 @@ function RecordPage() {
                 <button
                   onClick={handleUpdateDetails}
                   disabled={!engine.savedId}
-                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                  className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors disabled:opacity-50"
+                  style={{
+                    backgroundColor: justUpdated ? "oklch(0.62 0.19 145)" : "var(--primary)",
+                  }}
                 >
-                  <Check className="size-4" /> Update details
+                  <Check className="size-4" /> {justUpdated ? "Updated!" : "Update details"}
                 </button>
                 <button
                   onClick={handleNewOrReset}
