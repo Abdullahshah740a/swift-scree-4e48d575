@@ -2,44 +2,50 @@ import type { SourceType } from "./types";
 // sourceTypeLabel lives in ./format now; media.ts is browser capture only.
 
 /**
- * Choose a MediaRecorder mimeType the browser supports. WebM (VP9/VP8 + Opus)
- * is prioritized because MediaRecorder records it reliably in Chromium and
- * Firefox and <video> decodes it incrementally over HTTP. MP4 is kept only
- * as a last-resort fallback for Safari, which historically couldn't record
- * WebM — Chrome's MediaRecorder MP4 output is fragmented and often fails
- * to play back without a transcode-mux.
- */
-/**
  * Choose a MediaRecorder mimeType the browser can actually ENCODE for the
- * given stream. The codec string MUST match the stream's tracks: a video-only
- * screen capture (no system audio) recorded with `video/webm;codecs=vp9,opus`
- * can produce ZERO output chunks in some Chrome builds because the Opus audio
- * codec has no source track — which is exactly the "No media data was
- * captured (0 chunks)" failure. So when there's no audio track we pick a
- * video-only codec string (`codecs=vp9`, no opus); when there is audio we
- * include opus. WebM (VP9/VP8) is prioritized; MP4 is a last-resort fallback
- * (Safari). The caller still reads `MediaRecorder.mimeType` after construction
- * for the real container/codec actually in use.
+ * given stream, prioritizing BROAD playback compatibility so share links play
+ * on phones too.
+ *
+ * Why MP4 first: iOS Safari cannot decode WebM (VP9/VP8) in <video>, so a WebM
+ * recording plays for the sender (desktop Chrome/Firefox) but fails with
+ * "source not supported" on an iPhone. MP4 (H.264 + AAC / `avc1,mp4a.40.2`)
+ * plays in iOS Safari, Android Chrome, and desktop Chrome/Firefox/Safari/Edge
+ * — so it is tried first wherever the browser can RECORD it (Chrome, Safari,
+ * Edge). Firefox cannot record MP4 and falls through to the WebM candidates
+ * below.
+ *
+ * The codec string MUST match the stream's tracks: a video-only capture
+ * recorded with an Opus audio codec can produce ZERO chunks in some Chrome
+ * builds (Opus has no source track) — the "No media data was captured (0
+ * chunks)" bug. So with no audio we use a video-only codec string; with audio
+ * we add the matching audio codec. The caller always reads
+ * `MediaRecorder.mimeType` after construction for the real container/codec.
  */
 export function pickMimeType(hasAudio = true): { mimeType: string; ext: string } {
   if (typeof MediaRecorder === "undefined") {
     return { mimeType: "video/webm", ext: "webm" };
   }
 
-  // Try each video codec with (or without) an Opus audio codec depending on
-  // whether the stream actually carries audio. The bare `video/webm` entry
-  // lets the browser pick codecs itself if the explicit strings are rejected.
-  const videoCodecs = ["vp9", "vp8", "h264", ""] as const;
   const candidates: Array<{ mimeType: string; ext: string }> = [];
-  for (const v of videoCodecs) {
+
+  // 1) MP4 (H.264 + AAC) — broadly compatible incl. iOS Safari. The bare
+  //    `video/mp4` entry lets the browser pick codecs itself if the explicit
+  //    strings are rejected by isTypeSupported.
+  candidates.push({
+    mimeType: hasAudio ? `video/mp4;codecs=avc1,mp4a.40.2` : `video/mp4;codecs=avc1`,
+    ext: "mp4",
+  });
+  candidates.push({ mimeType: "video/mp4", ext: "mp4" });
+
+  // 2) WebM fallback (Firefox, and any browser without MP4 recording).
+  const webmCodecs = ["vp9", "vp8", "h264", ""] as const;
+  for (const v of webmCodecs) {
     const codec = v ? (hasAudio ? `${v},opus` : v) : "";
     candidates.push({
       mimeType: codec ? `video/webm;codecs=${codec}` : "video/webm",
       ext: "webm",
     });
   }
-  candidates.push({ mimeType: "video/mp4;codecs=avc1,mp4a.40.2", ext: "mp4" });
-  candidates.push({ mimeType: "video/mp4", ext: "mp4" });
 
   for (const c of candidates) {
     if (MediaRecorder.isTypeSupported?.(c.mimeType)) {

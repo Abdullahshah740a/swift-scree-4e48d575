@@ -120,12 +120,16 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
           // Ignore aborted loads (code 1) from src swaps.
           if (!activeSrc || err.code === 1) return;
 
-          // Distinguish "file missing / network" from "decode error" by
-          // probing the source. A 410 from the playback route means the
-          // cloud object is gone (e.g. a pre-localOnly recording whose
-          // upload timed out but whose metadata was saved). A 404/5xx is a
-          // network/storage failure. Only MEDIA_ERR_DECODE (code 3) is a
-          // true "browser can't decode this container/codec" problem.
+          // Distinguish "file missing / network" from a real decode/format
+          // problem by probing the source. A 410 from the playback route means
+          // the cloud object is gone (a pre-localOnly recording whose upload
+          // timed out but whose metadata was saved). A 404/5xx is a
+          // network/storage failure. Code 4 ("source not supported") means the
+          // browser RECEIVED bytes but its media engine rejected the
+          // container/codec — the classic case is a WebM (VP9/VP8) recording
+          // opened in iOS Safari, which cannot decode WebM. That is a format
+          // incompatibility, not a corrupt or incomplete recording, so the
+          // message says so honestly.
           const codeNames: Record<number, string> = {
             1: "aborted",
             2: "network error",
@@ -151,7 +155,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
               return;
             }
           } catch {
-            /* fall through to decode handling */
+            /* fall through to format handling */
           }
 
           // Try the remote streaming URL once before giving up.
@@ -162,11 +166,17 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
             return;
           }
           if (missing) return;
-          setVideoError(
-            err.code === 3
-              ? "The video file could not be decoded by the browser media engine."
-              : `Playback failed (${codeNames[err.code] ?? "error"}). The recording may be incomplete or in an unsupported format.`,
-          );
+          if (err.code === 4) {
+            setVideoError(
+              "This browser can’t play this recording’s format (it may be a WebM/VP9 file, which iOS Safari can’t decode). Open it on a desktop browser or download the original.",
+            );
+          } else if (err.code === 3) {
+            setVideoError("The video file could not be decoded by the browser media engine.");
+          } else {
+            setVideoError(
+              `Playback failed (${codeNames[err.code] ?? "error"}). The recording may be incomplete or in an unsupported format.`,
+            );
+          }
         }}
         onClick={togglePlay}
       />
