@@ -482,7 +482,7 @@ export function useRecordingEngine(qc: QueryClient): RecordingEngine {
       };
       await persistVideoMeta(record);
       qc.invalidateQueries({ queryKey: ["videos"] });
-      toast.success("Details updated");
+      toast.success("Details updated", { duration: 2000 });
     },
     [qc, savedId],
   );
