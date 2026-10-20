@@ -80,6 +80,7 @@ export function createRecorder(
 export interface RecordingStreams {
   screen: MediaStream | null;
   camera: MediaStream | null;
+  mic: MediaStream | null;
 }
 
 export async function getScreenStream(): Promise<MediaStream> {
@@ -94,6 +95,56 @@ export async function getCameraStream(): Promise<MediaStream> {
     video: { width: { ideal: 1280 }, height: { ideal: 720 } },
     audio: true,
   });
+}
+
+/** Capture the microphone for a voiceover track (screen + both modes). */
+export async function getMicStream(): Promise<MediaStream> {
+  return await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true },
+  });
+}
+
+export interface MixedAudio {
+  track: MediaStreamTrack;
+  /** Only present when 2+ sources were mixed via Web Audio; close on stop. */
+  context?: AudioContext;
+}
+
+/**
+ * Combine one or more live audio tracks into a single MediaStreamTrack.
+ * - 0 live tracks -> null (no audio; recorder uses a video-only codec)
+ * - 1 live track  -> returned as-is (no mixing needed)
+ * - 2+ live tracks -> mixed through a Web Audio MediaStreamDestination so the
+ *   recorder gets exactly one Opus track. MediaRecorder only reliably records
+ *   one audio track per stream, so an unmixed multi-track stream loses
+ *   everything but the first track. The returned context must be closed when
+ *   recording stops.
+ */
+export function mixAudioTracks(tracks: MediaStreamTrack[]): MixedAudio | null {
+  const live = tracks.filter((t) => t.readyState === "live");
+  const first = live[0];
+  if (live.length === 0 || !first) return null;
+  if (live.length === 1) return { track: first };
+  const Ctor =
+    typeof AudioContext !== "undefined"
+      ? AudioContext
+      : (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!Ctor) return { track: first };
+  const ctx = new Ctor();
+  const dest = ctx.createMediaStreamDestination();
+  for (const t of live) {
+    try {
+      ctx.createMediaStreamSource(new MediaStream([t])).connect(dest);
+    } catch {
+      /* skip a track Web Audio can't bind */
+    }
+  }
+  const out = dest.stream.getAudioTracks()[0];
+  if (!out) {
+    ctx.close().catch(() => {});
+    return { track: first };
+  }
+  return { track: out, context: ctx };
 }
 
 /** Capture a JPEG thumbnail data URL from a video/canvas element. */
