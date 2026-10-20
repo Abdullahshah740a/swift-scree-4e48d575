@@ -113,12 +113,47 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
         playsInline
         preload="auto"
         controls={false}
-        onError={(e) => {
+        onError={async (e) => {
           const err = e.currentTarget.error;
           if (!err) return;
-          console.warn("Video playback error code:", err.code, err.message);
+          console.warn("Video playback error code:", err.code, err.message, "src:", activeSrc);
           // Ignore aborted loads (code 1) from src swaps.
           if (!activeSrc || err.code === 1) return;
+
+          // Distinguish "file missing / network" from "decode error" by
+          // probing the source. A 410 from the playback route means the
+          // cloud object is gone (e.g. a pre-localOnly recording whose
+          // upload timed out but whose metadata was saved). A 404/5xx is a
+          // network/storage failure. Only MEDIA_ERR_DECODE (code 3) is a
+          // true "browser can't decode this container/codec" problem.
+          const codeNames: Record<number, string> = {
+            1: "aborted",
+            2: "network error",
+            3: "decode error",
+            4: "source not supported",
+          };
+          let missing = false;
+          try {
+            const probe = await fetch(activeSrc, { method: "GET" });
+            if (probe.status === 410) {
+              const body = await probe.json().catch(() => ({}));
+              missing = true;
+              setVideoError(
+                body.message ??
+                  "The video file is missing from cloud storage. This recording may only exist on the device that recorded it.",
+              );
+              return;
+            }
+            if (probe.status === 404 || probe.status >= 500) {
+              setVideoError(
+                "The video could not be reached (server error). Try again in a moment.",
+              );
+              return;
+            }
+          } catch {
+            /* fall through to decode handling */
+          }
+
           // Try the remote streaming URL once before giving up.
           if (!triedFallback.current && fallbackSrc && fallbackSrc !== activeSrc) {
             triedFallback.current = true;
@@ -126,7 +161,12 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
             setActiveSrc(fallbackSrc);
             return;
           }
-          setVideoError("The video file could not be decoded by the browser media engine.");
+          if (missing) return;
+          setVideoError(
+            err.code === 3
+              ? "The video file could not be decoded by the browser media engine."
+              : `Playback failed (${codeNames[err.code] ?? "error"}). The recording may be incomplete or in an unsupported format.`,
+          );
         }}
         onClick={togglePlay}
       />

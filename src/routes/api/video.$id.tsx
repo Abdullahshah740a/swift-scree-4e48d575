@@ -100,6 +100,45 @@ export const Route = createFileRoute("/api/video/$id")({
 
         // Playback mode: 302 to a signed URL (1 hour). The bucket name may
         // contain spaces, so encode it in the path.
+        //
+        // IMPORTANT: a recording may have cloud metadata but NO cloud video
+        // object — this happened with recordings made before the localOnly
+        // flag existed, when the old base64-over-RPC upload timed out but the
+        // metadata was still saved. Signing a URL for a missing object makes
+        // the <video> hit a CDN 404 and surface a generic "could not decode"
+        // error that's indistinguishable from a real codec problem. So we
+        // first verify the object exists with a cheap HEAD; only then sign.
+        // A missing object returns 410 Gone with a JSON body the player can
+        // read to show "video file missing" instead of "decode error".
+        const objHeadUrl = `${url}/storage/v1/object/${encodeURIComponent(bucket)}/${encodeURIComponent(objectPath)}`;
+        const headController = new AbortController();
+        const headTimer = setTimeout(() => headController.abort(), 9000);
+        let objectExists = true;
+        try {
+          const headRes = await fetch(objHeadUrl, {
+            method: "HEAD",
+            signal: headController.signal,
+            headers: { apikey: key, Authorization: `Bearer ${key}` },
+          });
+          if (headRes.status === 404 || headRes.status === 400) {
+            objectExists = false;
+          }
+        } catch {
+          // If the HEAD itself fails (network), don't block playback — let
+          // the signed URL attempt proceed and the player handle it.
+        } finally {
+          clearTimeout(headTimer);
+        }
+        if (!objectExists) {
+          return new Response(
+            JSON.stringify({
+              error: "missing",
+              message: "The video file is missing from cloud storage.",
+            }),
+            { status: 410, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
         const signPath = `/storage/v1/object/sign/${encodeURIComponent(bucket)}/${encodeURIComponent(objectPath)}`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 9000);
