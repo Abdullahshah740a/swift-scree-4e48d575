@@ -19,6 +19,7 @@ import {
 import { getBlob } from "@/lib/local-db";
 import { transcribeVideo } from "@/lib/transcript";
 import {
+  formatBytes,
   formatDuration,
   formatRelativeTime,
   sourceTypeLabel,
@@ -187,16 +188,61 @@ export function WatchContent({
     if (!video.data) return;
     setSyncing(true);
     setSyncDiag(null);
+    // Capture a diagnostic for EVERY failure path — including an unexpected
+    // throw from retryUpload (AbortError/network). Without this, the catch
+    // block below would only show a toast and the diagnostic block (with the
+    // real cause of the ~120s wait) would be lost — which is exactly what
+    // made the button "just revert to Sync to Cloud" with no details.
+    const startedAt = new Date().toISOString();
+    const startedAtMs = Date.now();
+    const recId = video.data.id;
+    let blobSize = 0;
+    let mime = video.data.mimeType;
+    let ext = video.data.ext;
     try {
       const blob = await getBlob(video.data.id);
       if (!blob || blob.size === 0) {
-        toast.error("Local copy not found — sync is only possible on the device that recorded it.");
+        const diag: SyncDiagnostics = {
+          recordingId: recId,
+          stage: "local-cache",
+          failed: true,
+          blobSize: 0,
+          blobSizeMb: "0 B",
+          mimeType: mime,
+          ext,
+          elapsedMs: Date.now() - startedAtMs,
+          startedAt,
+          httpStatus: null,
+          errorKind: "local-cache-missing",
+          errorMessage:
+            "Local copy not found — sync is only possible on the device that recorded it.",
+          rawName: "LocalCache",
+        };
+        setSyncDiag(diag);
+        toast.error(diag.errorMessage ?? "Local copy not found.");
         return;
       }
+      blobSize = blob.size;
       const res = await retryUpload(video.data, blob);
       if (res.localOnly) {
         toast.error(res.message ?? "Cloud upload failed. Try again later.");
         if (res.diag) setSyncDiag(res.diag);
+        else
+          setSyncDiag({
+            recordingId: recId,
+            stage: "upload-proxy",
+            failed: true,
+            blobSize,
+            blobSizeMb: formatBytes(blobSize),
+            mimeType: mime,
+            ext,
+            elapsedMs: Date.now() - startedAtMs,
+            startedAt,
+            httpStatus: null,
+            errorKind: "unknown",
+            errorMessage: res.message ?? "Cloud upload failed.",
+            rawName: "RetryUpload",
+          });
       } else {
         toast.success("Synced to Cloud — the share link now works everywhere.");
         qc.invalidateQueries({ queryKey: ["videos"] });
@@ -205,7 +251,28 @@ export function WatchContent({
         setSyncDiag(null);
       }
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Sync failed");
+      // Unexpected throw (e.g. the 120s AbortError fired by the client
+      // timeout). Preserve the sanitized diagnostic so the user can SEE why
+      // it waited two minutes and reverted — instead of a bare toast.
+      const name = e instanceof Error ? e.name : "Error";
+      const msg = e instanceof Error ? e.message : "Sync failed";
+      const isAbort = name === "AbortError";
+      setSyncDiag({
+        recordingId: recId,
+        stage: "upload-proxy",
+        failed: true,
+        blobSize,
+        blobSizeMb: formatBytes(blobSize),
+        mimeType: mime,
+        ext,
+        elapsedMs: Date.now() - startedAtMs,
+        startedAt,
+        httpStatus: null,
+        errorKind: isAbort ? "fetch-aborted" : "network",
+        errorMessage: msg,
+        rawName: name,
+      });
+      toast.error(isAbort ? "Cloud upload timed out — see details below." : msg);
     } finally {
       setSyncing(false);
     }
@@ -376,9 +443,16 @@ export function WatchContent({
             </div>
           ) : null}
           {syncDiag ? (
-            <div className="rounded-xl border border-border/60 bg-card/60 p-3 text-xs text-foreground">
-              <div className="flex items-center gap-2">
-                <span className="font-semibold">Cloud sync failed — diagnostic details</span>
+            <div
+              role="alert"
+              aria-live="assertive"
+              className="rounded-xl border border-destructive/50 bg-destructive/10 p-4 text-sm text-foreground ring-1 ring-destructive/30"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <AlertTriangle className="size-4 shrink-0 text-destructive" />
+                <span className="font-semibold text-destructive">
+                  Cloud sync failed — diagnostic details
+                </span>
                 <button
                   type="button"
                   onClick={() => {
@@ -393,7 +467,14 @@ export function WatchContent({
                   <Copy className="size-3.5" /> Copy diagnostic details
                 </button>
               </div>
-              <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground">
+              <p className="mt-2 text-xs text-muted-foreground">
+                Copy this block and paste it back so the exact failing stage can be diagnosed. The
+                text below is also selectable.
+              </p>
+              <pre
+                aria-label="Cloud sync diagnostic details"
+                className="mt-2 max-h-60 select-text overflow-auto rounded-lg border border-border/80 bg-background/80 p-3 font-mono text-[12px] leading-relaxed text-foreground"
+              >
                 {diagnosticsToText(syncDiag)}
               </pre>
             </div>

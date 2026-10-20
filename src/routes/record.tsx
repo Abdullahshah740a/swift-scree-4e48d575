@@ -351,9 +351,16 @@ function SourceOption({
 function CopyableDiagnostics({ diag }: { diag: SyncDiagnostics }) {
   const text = diagnosticsToText(diag);
   return (
-    <div className="rounded-lg border border-border/60 bg-card/60 p-3 text-xs text-foreground">
-      <div className="flex items-center gap-2">
-        <span className="font-semibold">Cloud sync failed — diagnostic details</span>
+    <div
+      role="alert"
+      aria-live="assertive"
+      className="rounded-xl border border-destructive/50 bg-destructive/10 p-4 text-sm text-foreground ring-1 ring-destructive/30"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <AlertTriangle className="size-4 shrink-0 text-destructive" />
+        <span className="font-semibold text-destructive">
+          Cloud sync failed — diagnostic details
+        </span>
         <button
           type="button"
           onClick={() => {
@@ -367,7 +374,14 @@ function CopyableDiagnostics({ diag }: { diag: SyncDiagnostics }) {
           <Copy className="size-3.5" /> Copy
         </button>
       </div>
-      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground">
+      <p className="mt-2 text-xs text-muted-foreground">
+        Copy this block and paste it back so the exact failing stage can be diagnosed. The text
+        below is also selectable.
+      </p>
+      <pre
+        aria-label="Cloud sync diagnostic details"
+        className="mt-2 max-h-60 select-text overflow-auto rounded-lg border border-border/80 bg-background/80 p-3 font-mono text-[12px] leading-relaxed text-foreground"
+      >
         {text}
       </pre>
     </div>
