@@ -90,40 +90,19 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
     ...reactions.map((r) => ({ time: r.time, kind: "reaction" as const })),
   ];
 
-  // Derive a working same-origin download URL from the remote streaming path
-  // (fallbackSrc is "/api/video/<id>"). A raw blob: URL that already failed to
-  // decode is useless as a download link, so prefer the remote ?download=1.
-  const downloadHref =
-    fallbackSrc && fallbackSrc.startsWith("/api/video/") ? `${fallbackSrc}?download=1` : activeSrc;
-
   return (
     <div className="group relative overflow-hidden rounded-xl border border-border/60 bg-black">
       {videoError ? (
-        <div className="flex min-h-[320px] flex-col items-center justify-center gap-2 p-6 text-center text-muted-foreground">
+        <div className="flex min-h-[320px] flex-col items-center justify-center p-6 text-center text-muted-foreground">
           <p className="text-sm font-medium text-foreground">Playback issue</p>
-          <p className="text-xs text-muted-foreground">{videoError}</p>
-          <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                // Force-retry from the remote streaming URL.
-                triedFallback.current = true;
-                setVideoError(null);
-                if (fallbackSrc) setActiveSrc(fallbackSrc);
-                else if (videoRef.current) videoRef.current.load();
-              }}
-              className="rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-accent"
-            >
-              Retry playback
-            </button>
-            <a
-              href={downloadHref}
-              download
-              className="rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-accent"
-            >
-              Download video directly
-            </a>
-          </div>
+          <p className="mt-1 text-xs text-muted-foreground">{videoError}</p>
+          <a
+            href={activeSrc}
+            download
+            className="mt-3 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-accent"
+          >
+            Download video directly
+          </a>
         </div>
       ) : null}
       <video
@@ -137,31 +116,17 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
         onError={(e) => {
           const err = e.currentTarget.error;
           if (!err) return;
-          console.warn("[player] playback error code:", err.code, err.message, {
-            src: activeSrc,
-            isBlob: activeSrc.startsWith("blob:"),
-            hasFallback: Boolean(fallbackSrc),
-          });
-          // Ignore aborted loads (code 1) from src swaps / retries.
-          if (err.code === 1) return;
-          // A stale/corrupt local IndexedDB blob often fails with code 3
-          // (decode). Swap to the remote streaming URL once before giving up.
+          console.warn("Video playback error code:", err.code, err.message);
+          // Ignore aborted loads (code 1) from src swaps.
+          if (!activeSrc || err.code === 1) return;
+          // Try the remote streaming URL once before giving up.
           if (!triedFallback.current && fallbackSrc && fallbackSrc !== activeSrc) {
-            console.info("[player] falling back to remote streaming URL");
             triedFallback.current = true;
             setVideoError(null);
             setActiveSrc(fallbackSrc);
             return;
           }
-          const reason =
-            err.code === 3
-              ? "The video file could not be decoded (it may be corrupt or still uploading)."
-              : err.code === 4
-                ? "The video file is not supported by this browser."
-                : err.code === 2
-                  ? "A network error blocked the video stream."
-                  : "The video file could not be loaded by the browser media engine.";
-          setVideoError(reason);
+          setVideoError("The video file could not be decoded by the browser media engine.");
         }}
         onClick={togglePlay}
       />

@@ -15,19 +15,15 @@ import {
   saveReactions as saveReactionsFn,
   saveTranscript as saveTranscriptFn,
   saveVideoMeta as saveVideoMetaFn,
-  uploadMp4 as uploadMp4Fn,
   uploadVideo as uploadVideoFn,
 } from "./storage.functions";
 import {
   deleteBlob,
-  deleteMp4Blob,
   deleteVideoMeta,
   getAllVideoMeta,
   getBlob,
-  getMp4Blob,
   getVideoMeta as getLocalMeta,
   putBlob,
-  putMp4Blob,
   putVideoMeta,
 } from "./local-db";
 import type {
@@ -41,7 +37,6 @@ import type {
   VideoRecord,
 } from "./types";
 import { safeCall, withTimeout } from "./with-timeout";
-import { convertBlobToMp4, type ConvertProgress } from "./convert";
 
 const DEFAULT_STATUS: StorageStatus = {
   configured: false,
@@ -139,7 +134,6 @@ export async function removeRecording(id: string, ext: string): Promise<void> {
   try {
     await deleteVideoMeta(id);
     await deleteBlob(id);
-    await deleteMp4Blob(id);
   } catch {
     /* best-effort */
   }
@@ -209,6 +203,13 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+/**
+ * Derive the correct on-disk extension for a recording from its actual MIME
+ * type — never from a renamed one. Renaming .webm → .mp4 does NOT transcode:
+ * it produces an .mp4-named WebM that local media players (QuickTime, Windows
+ * Media) reject. The recorder records WebM (VP9/VP8 + Opus) on Chrome/Firefox,
+ * so the honest extension is .webm; only genuine MP4 containers get .mp4.
+ */
 export function extForMime(mime: string | undefined): string {
   const m = (mime ?? "").toLowerCase();
   if (m.includes("mp4") || m === "video/mp4") return "mp4";
@@ -220,129 +221,53 @@ export function slugify(title: string | undefined): string {
   return s.replace(/^-+|-+$/g, "").slice(0, 80) || "swift-screen";
 }
 
-function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.rel = "noopener";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 4000);
-}
-
-function downloadUrl(href: string, filename: string): void {
-  const a = document.createElement("a");
-  a.href = href;
-  a.download = filename;
-  a.rel = "noopener";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
-export type DownloadProgress = ConvertProgress;
-
 /**
- * Trigger a genuine MP4 download. The downloaded file is a real H.264/AAC
- * MP4 (seekable in VLC), produced by converting the recording in-browser via
- * ffmpeg.wasm (loaded from CDN), cached in IndexedDB, and uploaded as a
- * derivative under videos/<id>.mp4 so subsequent downloads and other devices
- * reuse it. The original recording is never touched.
+ * Trigger a real file download for a recording.
  *
- * Order of preference:
- *  1. Cached converted MP4 in IndexedDB (instant, offline, repeat downloads).
- *  2. Already converted in the cloud (mp4Path set) — stream via ?mp4=1.
- *  3. Convert now: load original → convertBlobToMp4 → cache → upload → save.
+ * Browsers IGNORE the <a download> attribute when the href cross-redirects
+ * to a cross-origin URL — which is exactly what the playback 302 (→ Supabase
+ * CDN) does, so the old <a href="/api/video/$id" download> button navigated/
+ * played instead of saving. This instead:
+ *   1. Prefers the local IndexedDB blob when present → a same-origin blob:
+ *      URL, where the download attribute IS honored, and the file saves with
+ *      the correct .webm/.mp4 extension. This is also the ONLY copy that
+ *      exists for local-only recordings whose cloud blob upload fell over.
+ *   2. Falls back to a same-origin stream from /api/video/$id?download=1,
+ *      which the worker serves with Content-Disposition: attachment. A
+ *      same-origin attachment response forces a real save regardless of
+ *      container, and the server reads the bytes with the service-role key
+ *      (no signed-URL expiry edge cases).
  */
-export async function triggerVideoDownload(
-  rec: VideoRecord,
-  onProgress?: (p: DownloadProgress) => void,
-): Promise<void> {
-  const filename = `${slugify(rec.title)}.mp4`;
-
-  // 1) Cached converted MP4 in IndexedDB (instant, offline, repeat downloads).
-  try {
-    const cached = await getMp4Blob(rec.id);
-    if (cached && cached.size > 0) {
-      downloadBlob(cached, filename);
-      onProgress?.({ pct: 100, msg: "Starting download…" });
-      return;
-    }
-  } catch {
-    /* fall through to convert */
-  }
-
-  // 2) Already converted in the cloud (mp4Path set) — stream via the worker
-  //    with Content-Type: video/mp4 + attachment (.mp4).
-  if (rec.mp4Path) {
-    onProgress?.({ pct: 100, msg: "Starting download…" });
-    downloadUrl(`/api/video/${rec.id}?mp4=1`, filename);
-    return;
-  }
-
-  // 3) Need to convert. Load the original (local cache first, then cloud).
-  onProgress?.({ pct: 1, msg: "Preparing MP4…" });
-  let original: Blob | null = null;
-  try {
-    original = await getBlob(rec.id);
-  } catch {
-    /* try cloud */
-  }
-  if (!original || original.size === 0) {
-    try {
-      const res = await fetch(`/api/video/${rec.id}?download=1`);
-      if (res.ok) original = await res.blob();
-    } catch {
-      /* give up below */
-    }
-  }
-  if (!original || original.size === 0) {
-    throw new Error("Could not load the recording to convert.");
-  }
-
-  // Convert WebM -> seekable MP4 (H.264 + AAC, +faststart) in a worker.
-  const mp4 = await convertBlobToMp4(original, onProgress);
-
-  // Cache locally for instant repeat downloads.
-  try {
-    await putMp4Blob(rec.id, mp4);
-  } catch {
-    /* best-effort */
-  }
-
-  // Upload the derivative so other devices / share links reuse it without
-  // reconverting. Fire-and-forget; local cache still works if this fails.
-  onProgress?.({ pct: 99, msg: "Starting download…" });
-  try {
-    const base64 = await blobToBase64(mp4);
-    void uploadMp4Fn({ data: { id: rec.id, base64 } });
-    await putVideoMeta({ ...rec, mp4Path: `videos/${rec.id}.mp4`, mp4Size: mp4.size });
-  } catch {
-    /* cloud upload best-effort; local cache still works */
-  }
-
-  downloadBlob(mp4, filename);
-}
-
-/**
- * Trigger a download of the ORIGINAL recording with its truthful extension
- * (.webm for WebM, .mp4 only for genuine MP4). The bytes are NOT transcoded.
- */
-export async function triggerVideoDownloadOriginal(rec: VideoRecord): Promise<void> {
+export async function triggerVideoDownload(rec: VideoRecord): Promise<void> {
   const ext = rec.ext || extForMime(rec.mimeType);
   const filename = `${slugify(rec.title)}.${ext}`;
 
+  // 1) Local blob first (same-origin → download attribute honored).
   try {
     const blob = await getBlob(rec.id);
     if (blob && blob.size > 0) {
-      downloadBlob(blob, filename);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Revoke after the download has started.
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
       return;
     }
   } catch {
     /* fall through to cloud */
   }
 
-  downloadUrl(`/api/video/${rec.id}?download=1`, filename);
+  // 2) Same-origin attachment stream from the worker.
+  const a = document.createElement("a");
+  a.href = `/api/video/${rec.id}?download=1`;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }

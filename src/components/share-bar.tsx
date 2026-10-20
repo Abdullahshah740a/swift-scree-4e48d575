@@ -1,20 +1,7 @@
 import { useState } from "react";
-import {
-  Link as LinkIcon,
-  Code2,
-  Download,
-  Check,
-  Clipboard,
-  Trash2,
-  FileVideo,
-  Loader2,
-} from "lucide-react";
+import { Link as LinkIcon, Code2, Download, Check, Clipboard, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import {
-  triggerVideoDownload,
-  triggerVideoDownloadOriginal,
-  type DownloadProgress,
-} from "@/lib/storage-client";
+import { triggerVideoDownload } from "@/lib/storage-client";
 import type { VideoRecord } from "@/lib/types";
 
 export function ShareBar({
@@ -26,8 +13,6 @@ export function ShareBar({
 }) {
   const [copied, setCopied] = useState<"link" | "embed" | null>(null);
   const [downloading, setDownloading] = useState(false);
-  const [progress, setProgress] = useState<DownloadProgress | null>(null);
-  const [downloadingOrig, setDownloadingOrig] = useState(false);
 
   const shareUrl =
     typeof window !== "undefined" ? `${window.location.origin}/v/${video.id}` : `/v/${video.id}`;
@@ -45,43 +30,18 @@ export function ShareBar({
     }
   };
 
-  const handleDownloadMp4 = async () => {
-    if (downloading) return;
+  const handleDownload = async () => {
     setDownloading(true);
-    setProgress({ pct: 0, msg: "Preparing MP4…" });
     try {
-      await triggerVideoDownload(video, (p) => setProgress(p));
-      toast.success("Downloading MP4…");
-    } catch (e) {
-      toast.error("Could not prepare MP4 download");
-      console.error("[share-bar] mp4 download failed", e);
-    } finally {
-      setDownloading(false);
-      setProgress(null);
-    }
-  };
-
-  const handleDownloadOriginal = async () => {
-    if (downloadingOrig) return;
-    setDownloadingOrig(true);
-    try {
-      await triggerVideoDownloadOriginal(video);
-      toast.success("Downloading original…");
+      await triggerVideoDownload(video);
+      toast.success(`Downloading ${video.ext || "webm"}…`);
     } catch (e) {
       toast.error("Could not start download");
-      console.error("[share-bar] original download failed", e);
+      console.error("[share-bar] download failed", e);
     } finally {
-      setDownloadingOrig(false);
+      setDownloading(false);
     }
   };
-
-  const mp4Label = progress
-    ? progress.pct >= 100
-      ? "Starting download…"
-      : `${progress.msg} ${progress.pct}%`
-    : downloading
-      ? "Preparing MP4…"
-      : "Download MP4";
 
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border/60 bg-card/60 p-2">
@@ -101,26 +61,12 @@ export function ShareBar({
       </button>
       <button
         type="button"
-        onClick={handleDownloadMp4}
+        onClick={handleDownload}
         disabled={downloading}
         className="inline-flex items-center gap-2 rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-60"
-        title="Download MP4 (H.264, seekable in VLC)"
+        title={`Download .${video.ext || "webm"}`}
       >
-        {downloading ? (
-          <Loader2 className="size-4 animate-spin" />
-        ) : (
-          <Download className="size-4" />
-        )}
-        {mp4Label}
-      </button>
-      <button
-        type="button"
-        onClick={handleDownloadOriginal}
-        disabled={downloadingOrig}
-        className="inline-flex items-center gap-2 rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-60"
-        title={`Download original (.${video.ext || "webm"})`}
-      >
-        <FileVideo className="size-4" /> {downloadingOrig ? "Downloading…" : "Original"}
+        <Download className="size-4" /> {downloading ? "Downloading…" : "Download"}
       </button>
       {onDelete ? (
         <button

@@ -1,13 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Download, Clapperboard, FileVideo, Loader2 } from "lucide-react";
+import { Download, Clapperboard } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { WatchContent } from "@/components/watch-content";
-import {
-  fetchVideoMeta,
-  triggerVideoDownload,
-  triggerVideoDownloadOriginal,
-  type DownloadProgress,
-} from "@/lib/storage-client";
+import { fetchVideoMeta, triggerVideoDownload } from "@/lib/storage-client";
+import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { useState } from "react";
 
@@ -38,36 +34,17 @@ function ViewerPage() {
     queryFn: () => fetchVideoMeta(id),
   });
   const [downloading, setDownloading] = useState(false);
-  const [progress, setProgress] = useState<DownloadProgress | null>(null);
-  const [downloadingOrig, setDownloadingOrig] = useState(false);
 
-  const handleDownloadMp4 = async () => {
-    if (!data || downloading) return;
+  const handleDownload = async () => {
+    if (!data) return;
     setDownloading(true);
-    setProgress({ pct: 0, msg: "Preparing MP4…" });
     try {
-      await triggerVideoDownload(data, (p) => setProgress(p));
-      toast.success("Downloading MP4…");
-    } catch (e) {
-      toast.error("Could not prepare MP4 download");
-      console.error("[v] mp4 download failed", e);
+      await triggerVideoDownload(data);
+      toast.success(`Downloading ${data.ext || "webm"}…`);
+    } catch {
+      toast.error("Could not start download");
     } finally {
       setDownloading(false);
-      setProgress(null);
-    }
-  };
-
-  const handleDownloadOriginal = async () => {
-    if (!data || downloadingOrig) return;
-    setDownloadingOrig(true);
-    try {
-      await triggerVideoDownloadOriginal(data);
-      toast.success("Downloading original…");
-    } catch (e) {
-      toast.error("Could not start download");
-      console.error("[v] original download failed", e);
-    } finally {
-      setDownloadingOrig(false);
     }
   };
 
@@ -91,43 +68,21 @@ function ViewerPage() {
     );
   }
 
-  const mp4Label = progress
-    ? progress.pct >= 100
-      ? "Starting download…"
-      : `${progress.msg} ${progress.pct}%`
-    : downloading
-      ? "Preparing MP4…"
-      : "Download MP4";
-
   return (
     <div className="min-h-screen bg-background">
       <div className="mx-auto max-w-5xl px-4 py-6">
-        <div className="mb-4 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+        <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
           <Clapperboard className="size-4 text-primary" />
           <span className="font-semibold text-foreground">Swift Screen</span>
-          <span className="ml-auto flex items-center gap-2">
+          <span className="ml-auto">
             <button
               type="button"
-              onClick={handleDownloadMp4}
+              onClick={handleDownload}
               disabled={downloading}
               className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-60"
-              title="Download MP4 (H.264, seekable in VLC)"
+              title={`Download .${data.ext || "webm"}`}
             >
-              {downloading ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <Download className="size-3.5" />
-              )}
-              {mp4Label}
-            </button>
-            <button
-              type="button"
-              onClick={handleDownloadOriginal}
-              disabled={downloadingOrig}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-60"
-              title={`Download original (.${data.ext || "webm"})`}
-            >
-              <FileVideo className="size-3.5" /> {downloadingOrig ? "Downloading…" : "Original"}
+              <Download className="size-3.5" /> {downloading ? "Downloading…" : "Download"}
             </button>
           </span>
         </div>
