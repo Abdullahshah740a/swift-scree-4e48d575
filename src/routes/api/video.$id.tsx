@@ -139,7 +139,20 @@ export const Route = createFileRoute("/api/video/$id")({
           );
         }
 
-        const signPath = `/storage/v1/object/sign/${encodeURIComponent(bucket)}/${encodeURIComponent(objectPath)}`;
+        // Sign a short-lived URL for the object. The object path
+        // `videos/<id>.<ext>` must keep its `/` as a literal path separator:
+        // encodeURIComponent("videos/<id>.<ext>") encodes the `/` to %2F, which
+        // the sign endpoint signs verbatim — the resulting signed URL then
+        // resolves to `…/videos%2F<id>.<ext>` and the CDN rejects it with
+        // 404 {"error":"requested path is invalid"}. That was the actual
+        // delivery failure: the sender's local IndexedDB blob played fine, but
+        // the receiver (signed URL only) got no valid bytes and the <video>
+        // surfaced a generic decode error. Encode each segment separately and
+        // join with literal `/` so the signed URL points at the real nested
+        // path. (HEAD/POST/list endpoints tolerate %2F; the sign + signed-URL
+        // GET chain does not.)
+        const objectSegments = objectPath.split("/").map(encodeURIComponent).join("/");
+        const signPath = `/storage/v1/object/sign/${encodeURIComponent(bucket)}/${objectSegments}`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 9000);
         try {
