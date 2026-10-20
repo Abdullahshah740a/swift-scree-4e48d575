@@ -205,27 +205,35 @@ async function removeObject(path: string): Promise<void> {
 export async function createUploadUrl(
   id: string,
   ext: string,
-): Promise<{ ok: boolean; url?: string; error?: string }> {
+): Promise<{ ok: boolean; url?: string; error?: string; status?: number }> {
   if (!configured()) return { ok: false, error: NOT_CONFIGURED_MSG };
   const { url, bucket } = env();
   const objectPath = `videos/${id}.${ext}`;
   try {
+    // The /upload/sign endpoint REQUIRES a JSON body — declaring
+    // Content-Type: application/json without one is rejected with
+    // 400 "Body cannot be empty when content-type is set to
+    // 'application/json'". Send an empty JSON object.
     const res = await sbFetch(
       `/storage/v1/object/upload/sign/${encodeBucket(bucket)}/${encodeURIComponent(objectPath)}`,
-      { method: "POST", headers: { "Content-Type": "application/json" } },
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
     );
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      return { ok: false, error: `sign failed: ${res.status} ${text}` };
+      return { ok: false, status: res.status, error: `sign failed: ${res.status} ${text}` };
     }
     const data = (await res.json()) as { signedURL?: string; signed_url?: string; url?: string };
     const signed = data.signedURL ?? data.signed_url ?? data.url;
-    if (!signed) return { ok: false, error: "No signed URL in response." };
+    if (!signed) return { ok: false, status: res.status, error: "No signed URL in response." };
     // signed_url may be relative ("/storage/v1/...") or absolute.
     const full = signed.startsWith("http")
       ? signed
       : `${url}${signed.startsWith("/") ? "" : "/"}${signed}`;
-    return { ok: true, url: full };
+    return { ok: true, status: res.status, url: full };
   } catch (e) {
     return { ok: false, error: errMsg(e) };
   }

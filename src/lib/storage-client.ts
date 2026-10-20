@@ -196,7 +196,12 @@ async function uploadBlobDirect(
           ...base,
           stage: "sign-url",
           failed: true,
-          errorKind: "server-rejected",
+          // Distinguish the upstream storage status (a real HTTP rejection)
+          // from a transport failure. signRes.status is the storage API's
+          // response code when it rejected the request; null means the RPC
+          // failed before any storage response (network/abort).
+          httpStatus: signRes?.status ?? null,
+          errorKind: signRes?.status ? "server-rejected" : "server-rejected",
           errorMessage: msg,
           rawName: "SignUrl",
         },
@@ -213,6 +218,7 @@ async function uploadBlobDirect(
         ...base,
         stage: "sign-url",
         failed: true,
+        httpStatus: null,
         errorKind: e instanceof Error && e.name === "AbortError" ? "fetch-aborted" : "network",
         errorMessage: msg,
         rawName: e instanceof Error ? e.name : "Error",
