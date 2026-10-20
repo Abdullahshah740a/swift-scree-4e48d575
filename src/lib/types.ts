@@ -117,27 +117,3 @@ export interface VideoObjectCheck {
   configured: boolean;
   error?: string;
 }
-
-/**
- * Diagnostic record captured during a Sync to Cloud / save attempt, so the
- * real failing stage and error are surfaced instead of a generic
- * "Local only" banner. Never contains the video bytes, credentials, signed
- * tokens, or authorization headers — only sanitized, correlation-useful
- * metadata the user can copy back.
- */
-export interface SyncDiagnostics {
-  recordingId: string;
-  stage: "local-cache" | "sign-url" | "upload" | "metadata" | "verify" | "done" | "unknown";
-  failed: boolean;
-  blobSize: number;
-  blobSizeMb: string;
-  mimeType: string;
-  ext: string;
-  elapsedMs: number | null;
-  startedAt: string;
-  httpStatus: number | null;
-  /** "fetch-aborted" (client timeout), "network", "server-rejected", "ok", etc. */
-  errorKind: string;
-  errorMessage: string | null;
-  rawName: string | null;
-}

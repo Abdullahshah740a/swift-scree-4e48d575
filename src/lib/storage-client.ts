@@ -1,28 +1,5 @@
-import { checkVideoObject as checkVideoObjectFn } from "./storage.functions";
 import {
-  deleteBlob,
-  deleteVideoMeta,
-  getAllVideoMeta,
-  getBlob,
-  getVideoMeta as getLocalMeta,
-  putBlob,
-  putVideoMeta,
-} from "./local-db";
-import { formatBytes } from "./format";
-import type {
-  Comment,
-  Folder,
-  FolderOpResult,
-  MoveResult,
-  Reaction,
-  StorageStatus,
-  SyncDiagnostics,
-  Transcript,
-  VideoObjectCheck,
-  VideoRecord,
-} from "./types";
-import { safeCall, withTimeout } from "./with-timeout";
-import {
+  checkVideoObject as checkVideoObjectFn,
   createFolder as createFolderFn,
   deleteFolder as deleteFolderFn,
   deleteVideo as deleteVideoFn,
@@ -40,6 +17,27 @@ import {
   saveTranscript as saveTranscriptFn,
   saveVideoMeta as saveVideoMetaFn,
 } from "./storage.functions";
+import {
+  deleteBlob,
+  deleteVideoMeta,
+  getAllVideoMeta,
+  getBlob,
+  getVideoMeta as getLocalMeta,
+  putBlob,
+  putVideoMeta,
+} from "./local-db";
+import type {
+  Comment,
+  Folder,
+  FolderOpResult,
+  MoveResult,
+  Reaction,
+  StorageStatus,
+  Transcript,
+  VideoObjectCheck,
+  VideoRecord,
+} from "./types";
+import { safeCall, withTimeout } from "./with-timeout";
 
 const DEFAULT_STATUS: StorageStatus = {
   configured: false,
@@ -76,10 +74,19 @@ export async function fetchVideoMeta(id: string): Promise<VideoRecord | null> {
 
 /**
  * Check whether a recording's video binary actually exists in Cloud Storage.
- * See the StorageStatus / VideoObjectCheck docs for the present/missing/unknown
- * contract. The check may be retried by the caller.
+ * Used by the watch page to detect a pre-`localOnly` recording (no flag,
+ * cloud metadata present, but the binary upload failed under the old
+ * base64-over-RPC path) and offer a "Sync to Cloud" recovery from the local
+ * IndexedDB blob. Returns exists=false only on a confirmed 404/400; network
+ * errors are treated as "exists" so a transient failure never wrongly hides
+ * a recording.
  */
 export async function fetchVideoObjectStatus(id: string, ext: string): Promise<VideoObjectCheck> {
+  // The server returns an explicit present/missing/unknown status and never
+  // throws for its own network errors (it catches them -> "unknown").
+  // safeCall only guards a transport failure in the RPC itself, defaulting to
+  // "unknown" so a recording is never wrongly claimed verified in cloud
+  // storage — but it also stays visible (unknown is not missing).
   return safeCall(checkVideoObjectFn({ data: { id, ext } }), {
     status: "unknown",
     size: null,
@@ -120,171 +127,65 @@ export async function persistTranscript(transcript: Transcript): Promise<void> {
 }
 
 /**
- * Upload a recording blob to Cloud Storage through the same-origin Edge
- * worker proxy at /api/upload/$id. The browser POSTs the raw bytes to the
- * proxy (same-origin — no CORS preflight); the proxy forwards them to Cloud
- * Storage with the service-role key (key never reaches the browser) and
- * returns the object path.
+ * Upload a recording blob through the SAME-ORIGIN upload proxy
+ * (/api/upload/$id). The proxy forwards the raw bytes to Cloud Storage with
+ * the service-role key server-side, so:
+ *   - no cross-origin PUT to the Supabase signed URL (which needs bucket CORS
+ *     the platform may not have configured → silent failures),
+ *   - no base64-over-RPC (which exceeds the Edge worker payload limit for any
+ *     real recording and times out — the original "Cloud not reachable"
+ *     symptom),
+ *   - the service-role key never reaches the browser.
+ * Returns true ONLY when the proxy reported a 200 with an ok body — the proxy
+ * itself streams the raw body straight to Storage and only returns 200 once
+ * the Storage POST succeeded, so a 200 here means the object was stored.
  *
- * WHY same-origin proxy and not a direct browser PUT to a signed upload URL:
- * the bucket would need CORS rules for the app's origin to allow a
- * cross-origin PUT, which the platform does not guarantee and we cannot set
- * from here. A direct cross-origin PUT is rejected at the preflight and
- * surfaces as "Failed to fetch" (TypeError) with NO HTTP response even for a
- * tiny recording — exactly the regression observed (3ab… 153 KB, ~1.5s). The
- * same-origin proxy avoids the cross-origin preflight entirely; this is the
- * path that previously worked for small uploads.
- *
- * The larger-upload 120s timeout that the direct-PUT attempt tried to work
- * around remains UNRESOLVED for now — the proxy still buffers the body
- * server-side, so a multi-MB recording may still stall on the preview
- * gateway's request-body path. That is a separate, pre-existing issue and
- * does not block small/normal recordings.
- *
- * Diagnostics label the stage "upload" and distinguish a real HTTP rejection
- * (server-rejected, with the proxy/upstream status) from a transport failure
- * (network / fetch-aborted, no response). The signed URL/token is NEVER
- * included in a diagnostic — see redactSignedUrl, which scrubs any
- * token/sig/signature/url query param.
- *
- * Returns true ONLY when the proxy returned 2xx (the object was accepted).
+ * The full error is preserved and surfaced (not swallowed) so the save flow
+ * can distinguish a real transport failure from success and report it
+ * honestly to the user instead of a silent "saved locally only".
  */
-function redactSignedUrl(s: string | undefined | null): string {
-  if (!s) return "";
-  // Strip any query params that could carry a token/signature/signed URL so a
-  // diagnostic never leaks a credential. Cloud Storage error bodies don't
-  // normally include them, but this guarantees it before surfacing text.
-  return s.replace(/[?&][^&\s]*(token|sig|signature|url|secret)=[^&\s]*/gi, "[redacted]");
-}
-
-async function uploadBlobDirect(
+async function uploadBlobViaProxy(
   id: string,
   ext: string,
   blob: Blob,
   mime: string,
-): Promise<{ ok: boolean; status?: number; error?: string; diag: SyncDiagnostics }> {
-  const startedAtMs = Date.now();
-  const startedAtIso = new Date(startedAtMs).toISOString();
-  const base: Omit<SyncDiagnostics, "failed" | "stage"> = {
-    recordingId: id,
-    blobSize: blob.size,
-    blobSizeMb: formatBytes(blob.size),
-    mimeType: mime,
-    ext,
-    elapsedMs: null,
-    startedAt: startedAtIso,
-    httpStatus: null,
-    errorKind: "ok",
-    errorMessage: null,
-    rawName: null,
-  };
-
-  // 1) Reachability probe: a tiny GET to the same route. If this also fails
-  //    with "Failed to fetch", the cause is route reachability (network/
-  //    gateway/CSP), NOT the POST body or size — and we surface that
-  //    distinction in the diagnostic instead of guessing.
+): Promise<{ ok: boolean; status?: number; error?: string }> {
+  const controller = new AbortController();
+  // 120s is generous for a real recording over a streamed same-origin POST;
+  // a stall still aborts rather than hanging the save.
+  const timer = setTimeout(() => controller.abort(), 120000);
   try {
-    const probe = await fetch(`/api/upload/${id}`, {
-      method: "GET",
-      // short, bounded — a route-reachability check should never take long
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!probe.ok) {
-      const msg = `Upload route unreachable (GET ${probe.status})`;
-      console.warn("[upload] probe failed:", probe.status);
-      return {
-        ok: false,
-        error: msg,
-        diag: {
-          ...base,
-          stage: "upload",
-          failed: true,
-          elapsedMs: Date.now() - startedAtMs,
-          httpStatus: probe.status,
-          errorKind: "server-rejected",
-          errorMessage: msg,
-          rawName: "Probe",
-        },
-      };
-    }
-  } catch (e) {
-    const msg = "Upload route not reachable from browser (GET failed)";
-    console.warn("[upload] probe threw:", e instanceof Error ? e.name : "Error");
-    return {
-      ok: false,
-      error: msg,
-      diag: {
-        ...base,
-        stage: "upload",
-        failed: true,
-        elapsedMs: Date.now() - startedAtMs,
-        httpStatus: null,
-        errorKind: "route-unreachable",
-        errorMessage: msg,
-        rawName: e instanceof Error ? e.name : "Error",
-      },
-    };
-  }
-
-  // 2) Same-origin POST to the Edge worker proxy. The proxy forwards the bytes
-  //    to Cloud Storage with the service-role key; the browser never makes a
-  //    cross-origin request, so there is no CORS preflight to reject. Bounded by
-  //    an AbortController so a stall surfaces as a real error instead of hanging.
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 120_000);
-  try {
-    const res = await fetch(`/api/upload/${id}`, {
+    const res = await fetch(`/api/upload/${encodeURIComponent(id)}`, {
       method: "POST",
-      signal: ctrl.signal,
+      signal: controller.signal,
       headers: {
         "Content-Type": mime || "application/octet-stream",
         "x-ext": ext,
       },
       body: blob,
     });
-    const elapsedMs = Date.now() - startedAtMs;
     if (!res.ok) {
-      const text = redactSignedUrl(await res.text().catch(() => ""));
-      const msg = `Upload failed (${res.status})${text ? `: ${text.slice(0, 200)}` : ""}`;
+      const text = await res.text().catch(() => "");
+      const msg = `Upload proxy ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`;
       console.warn("[upload] proxy failed:", res.status, text);
-      return {
-        ok: false,
-        status: res.status,
-        error: msg,
-        diag: {
-          ...base,
-          stage: "upload",
-          failed: true,
-          elapsedMs,
-          httpStatus: res.status,
-          errorKind: "server-rejected",
-          errorMessage: msg,
-          rawName: "Response",
-        },
-      };
+      return { ok: false, status: res.status, error: msg };
     }
-    return { ok: true, diag: { ...base, stage: "upload", failed: false, elapsedMs } };
+    // The proxy returns {ok, storagePath, ext}. A non-ok body is a server
+    // error even over HTTP 200 (defensive — the proxy returns 502 on failure,
+    // but don't trust the status alone).
+    try {
+      const data = (await res.json()) as { ok?: boolean };
+      if (data?.ok === false) {
+        return { ok: false, status: res.status, error: "Upload proxy reported failure." };
+      }
+    } catch {
+      /* body not JSON — treat the 200 as success */
+    }
+    return { ok: true };
   } catch (e) {
-    const elapsedMs = Date.now() - startedAtMs;
-    const raw = e instanceof Error ? e.name : "Error";
-    const isAbort = e instanceof Error && e.name === "AbortError";
-    const kind = isAbort ? "fetch-aborted" : "network";
-    const msg = redactSignedUrl(e instanceof Error ? e.message : "Upload transport error");
-    console.warn("[upload] proxy threw:", raw, msg);
-    return {
-      ok: false,
-      error: msg,
-      diag: {
-        ...base,
-        stage: "upload",
-        failed: true,
-        elapsedMs,
-        httpStatus: null,
-        errorKind: kind,
-        errorMessage: msg,
-        rawName: raw,
-      },
-    };
+    const msg = e instanceof Error ? e.message : "Upload transport error";
+    console.warn("[upload] proxy threw:", msg);
+    return { ok: false, error: msg };
   } finally {
     clearTimeout(timer);
   }
@@ -292,22 +193,16 @@ async function uploadBlobDirect(
 
 /**
  * Save a completed recording: upload blob + meta, and cache locally. Uploads
- * the blob DIRECTLY to Cloud Storage via a server-signed URL (not through the
- * Edge worker, which stalls for multi-MB bodies on the preview gateway — see
- * uploadBlobDirect). Only marks the recording as shareable (localOnly=false)
- * when BOTH the video object AND its metadata actually persisted to Cloud —
- * so "Saved to Cloud" is never shown for a recording whose binary is missing.
+ * the blob through the same-origin proxy (not base64-over-RPC, which hit the
+ * Edge payload limit for real recordings). Only marks the recording as
+ * shareable (localOnly=false) when BOTH the video object AND its metadata
+ * actually persisted to Cloud — so "Saved to Cloud" is never shown for a
+ * recording whose binary is missing.
  */
 export async function saveRecording(
   record: VideoRecord,
   blob: Blob,
-): Promise<{
-  ok: boolean;
-  localOnly: boolean;
-  message: string | undefined;
-  verified?: boolean;
-  diag: SyncDiagnostics | null;
-}> {
+): Promise<{ ok: boolean; localOnly: boolean; message: string | undefined; verified?: boolean }> {
   // Always cache locally first so it works offline / without a backend, and
   // so a failed cloud upload can be retried later from this device.
   let localSaved = false;
@@ -321,44 +216,19 @@ export async function saveRecording(
     console.warn("[save] local cache failed:", localErr);
   }
 
-  const upload = await uploadBlobDirect(record.id, record.ext, blob, record.mimeType);
+  const upload = await uploadBlobViaProxy(record.id, record.ext, blob, record.mimeType);
   if (upload.ok) {
     // Meta is what makes the recording appear in the shared library. Only
     // persist it once the video object exists, and mark it NOT localOnly.
-    // Do NOT wrap this in safeCall with a success-shaped default — that
-    // masks a metadata write failure as success and reports "Saved to Cloud"
-    // for a recording that won't appear in the shared library. A throw here
-    // is a real failure: downgrade to local-only with the real error.
     const cloudRecord = { ...record, localOnly: false };
-    let metaOk = false;
-    let metaErr: string | undefined;
-    try {
-      const meta = await withTimeout(saveVideoMetaFn({ data: { record: cloudRecord } }), 12000);
-      metaOk = Boolean(meta?.ok);
-    } catch (e) {
-      metaErr = e instanceof Error ? e.message : "Metadata save failed";
-      console.warn("[save] meta save failed:", metaErr);
-    }
-    if (!metaOk) {
+    const meta = await safeCall(saveVideoMetaFn({ data: { record: cloudRecord } }), {
+      ok: true,
+    });
+    if (!meta?.ok) {
       return {
         ok: true,
         localOnly: true,
-        message: `Video uploaded, but metadata could not be saved${metaErr ? ` (${metaErr})` : ""}. Saved locally only — use “Sync to Cloud” to retry.`,
-        diag: {
-          recordingId: record.id,
-          stage: "metadata",
-          failed: true,
-          blobSize: blob.size,
-          blobSizeMb: formatBytes(blob.size),
-          mimeType: record.mimeType,
-          ext: record.ext,
-          elapsedMs: null,
-          startedAt: new Date().toISOString(),
-          httpStatus: null,
-          errorKind: "server-rejected",
-          errorMessage: metaErr ?? "Metadata save did not confirm.",
-          rawName: "MetaSave",
-        },
+        message: "Uploaded video, but could not save metadata. Retrying soon.",
       };
     }
     // Update the local cache to reflect the confirmed cloud state.
@@ -368,11 +238,11 @@ export async function saveRecording(
       /* best-effort */
     }
     // Best-effort byte-size verification: HEAD the stored object and compare
-    // its content-length to the source Blob size. A successful PUT only proves
-    // the upload accepted the bytes; a matching HEAD size is the closest
-    // available proof the stored bytes match the source.
+    // its content-length to the source Blob size. A proxy 200 only proves the
+    // upload handler ran; a matching HEAD size is the closest available proof
+    // the stored bytes match the source. Never blocks the save — a
+    // missing/unknown check logs and falls back to "uploaded but unverified".
     let verified = false;
-    let verifyDiag: SyncDiagnostics | null = null;
     try {
       const check = await fetchVideoObjectStatus(record.id, record.ext);
       if (check.status === "present" && check.size !== null) {
@@ -386,28 +256,13 @@ export async function saveRecording(
       } else if (check.status === "missing") {
         console.warn("[save] object reported missing right after upload");
       }
-      verifyDiag = {
-        recordingId: record.id,
-        stage: "verify",
-        failed: check.status !== "present" || (check.size !== null && check.size !== blob.size),
-        blobSize: blob.size,
-        blobSizeMb: formatBytes(blob.size),
-        mimeType: record.mimeType,
-        ext: record.ext,
-        elapsedMs: null,
-        startedAt: new Date().toISOString(),
-        httpStatus: null,
-        errorKind: check.status === "present" ? "ok" : check.status,
-        errorMessage: check.error ?? null,
-        rawName: null,
-      };
     } catch {
       /* verification unavailable — uploaded but unverified */
     }
-    return { ok: true, localOnly: false, message: undefined, verified, diag: verifyDiag };
+    return { ok: true, localOnly: false, message: undefined, verified };
   }
   // Upload failed. Preserve the real error so the user sees the actual cause
-  // (transport, signed-URL rejection, etc.) instead of a generic banner.
+  // (transport, proxy 5xx, etc.) instead of a generic "Cloud not reachable".
   const reason = upload.error ?? "Cloud upload failed.";
   return {
     ok: localSaved,
@@ -415,14 +270,14 @@ export async function saveRecording(
     message: localSaved
       ? `${reason} Saved locally only — use “Sync to Cloud” to retry.`
       : `${reason} Local cache also failed${localErr ? ` (${localErr})` : ""}.`,
-    diag: upload.diag,
   };
 }
 
 /**
  * Re-upload a local-only recording's bytes to Cloud so it becomes shareable.
- * Used by the watch page's "Sync to Cloud" retry. Only available on a device
- * that still has the IndexedDB blob. Preserves the recording's id (no dupes).
+ * Used by the watch page's "Sync to Cloud" retry when the original upload
+ * failed. Only available on a device that still has the IndexedDB blob.
+ * Preserves the recording's id (no duplicates).
  */
 export async function retryUpload(
   rec: VideoRecord,
@@ -432,51 +287,20 @@ export async function retryUpload(
   localOnly: boolean;
   message: string | undefined;
   verified?: boolean;
-  diag: SyncDiagnostics | null;
 }> {
-  const upload = await uploadBlobDirect(rec.id, rec.ext, blob, rec.mimeType);
+  const upload = await uploadBlobViaProxy(rec.id, rec.ext, blob, rec.mimeType);
   if (upload.ok) {
     const cloudRecord = { ...rec, localOnly: false };
-    // Same as saveRecording: do NOT mask a metadata write failure as success.
-    let metaOk = false;
-    let metaErr: string | undefined;
-    try {
-      const meta = await withTimeout(saveVideoMetaFn({ data: { record: cloudRecord } }), 12000);
-      metaOk = Boolean(meta?.ok);
-    } catch (e) {
-      metaErr = e instanceof Error ? e.message : "Metadata save failed";
-      console.warn("[retry] meta save failed:", metaErr);
-    }
-    if (!metaOk) {
-      return {
-        ok: false,
-        localOnly: true,
-        message: `Video uploaded, but metadata could not be saved${metaErr ? ` (${metaErr})` : ""}. Try again.`,
-        diag: {
-          recordingId: rec.id,
-          stage: "metadata",
-          failed: true,
-          blobSize: blob.size,
-          blobSizeMb: formatBytes(blob.size),
-          mimeType: rec.mimeType,
-          ext: rec.ext,
-          elapsedMs: null,
-          startedAt: new Date().toISOString(),
-          httpStatus: null,
-          errorKind: "server-rejected",
-          errorMessage: metaErr ?? "Metadata save did not confirm.",
-          rawName: "MetaSave",
-        },
-      };
-    }
+    await safeCall(saveVideoMetaFn({ data: { record: cloudRecord } }), { ok: true });
     try {
       await putVideoMeta(cloudRecord);
     } catch {
       /* best-effort */
     }
-    // Best-effort byte-size verification (see saveRecording).
+    // Best-effort byte-size verification (see saveRecording). A successful
+    // retry does not by itself prove the stored bytes match — compare the
+    // object's content-length to the source Blob where available.
     let verified = false;
-    let verifyDiag: SyncDiagnostics | null = null;
     try {
       const check = await fetchVideoObjectStatus(rec.id, rec.ext);
       if (check.status === "present" && check.size !== null) {
@@ -488,31 +312,15 @@ export async function retryUpload(
           });
         }
       }
-      verifyDiag = {
-        recordingId: rec.id,
-        stage: "verify",
-        failed: check.status !== "present" || (check.size !== null && check.size !== blob.size),
-        blobSize: blob.size,
-        blobSizeMb: formatBytes(blob.size),
-        mimeType: rec.mimeType,
-        ext: rec.ext,
-        elapsedMs: null,
-        startedAt: new Date().toISOString(),
-        httpStatus: null,
-        errorKind: check.status === "present" ? "ok" : check.status,
-        errorMessage: check.error ?? null,
-        rawName: null,
-      };
     } catch {
       /* verification unavailable — uploaded but unverified */
     }
-    return { ok: true, localOnly: false, message: undefined, verified, diag: verifyDiag };
+    return { ok: true, localOnly: false, message: undefined, verified };
   }
   return {
     ok: false,
     localOnly: true,
     message: upload.error ?? "Cloud upload failed. Try again later.",
-    diag: upload.diag,
   };
 }
 
@@ -557,6 +365,11 @@ export async function resolveVideoUrl(
 
 /* ---- Strict folder/move operations (no swallow) ---- */
 
+/**
+ * Create a folder. The id is generated client-side so a retry cannot create
+ * duplicates. Surfaces a typed result so the UI can distinguish a real
+ * failure from success instead of swallowing it.
+ */
 export async function createFolderStrict(id: string, name: string): Promise<FolderOpResult> {
   return withTimeout(createFolderFn({ data: { id, name } }), 12000);
 }
@@ -565,6 +378,12 @@ export async function deleteFolderStrict(id: string): Promise<FolderOpResult> {
   return withTimeout(deleteFolderFn({ data: { id } }), 12000);
 }
 
+/**
+ * Move a recording's folder assignment. Updates only metadata — the video
+ * binary is never relocated. Surfaces a typed result distinguishing a real
+ * failure ("not found", "invalid folder", transport) from a confirmed move.
+ * On a confirmed cloud move, syncs the local IndexedDB cache too.
+ */
 export async function moveVideoStrict(
   videoId: string,
   folderId: string | null,
@@ -580,6 +399,13 @@ export async function moveVideoStrict(
   return res;
 }
 
+/**
+ * Derive the correct on-disk extension for a recording from its actual MIME
+ * type — never from a renamed one. Renaming .webm → .mp4 does NOT transcode:
+ * it produces an .mp4-named WebM that local media players (QuickTime, Windows
+ * Media) reject. The recorder records WebM (VP9/VP8 + Opus) on Chrome/Firefox,
+ * so the honest extension is .webm; only genuine MP4 containers get .mp4.
+ */
 export function extForMime(mime: string | undefined): string {
   const m = (mime ?? "").toLowerCase();
   if (m.includes("mp4") || m === "video/mp4") return "mp4";
@@ -624,6 +450,7 @@ export async function triggerVideoDownload(rec: VideoRecord): Promise<void> {
       document.body.appendChild(a);
       a.click();
       a.remove();
+      // Revoke after the download has started.
       setTimeout(() => URL.revokeObjectURL(url), 4000);
       return;
     }

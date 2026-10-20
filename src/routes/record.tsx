@@ -12,13 +12,11 @@ import {
   Loader2,
   AlertTriangle,
   RefreshCw,
-  Copy,
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRecordingEngine } from "@/hooks/use-recording";
-import { sourceTypeLabel, diagnosticsToText } from "@/lib/format";
-import type { SyncDiagnostics, SourceType } from "@/lib/types";
-import { toast } from "sonner";
+import { sourceTypeLabel } from "@/lib/format";
+import type { SourceType } from "@/lib/types";
 
 export const Route = createFileRoute("/record")({
   head: () => ({
@@ -238,15 +236,9 @@ function RecordPage() {
               )}
               <span>{engine.saveMsg}</span>
               {engine.savedLocalOnly && engine.savedId ? (
-                <button
-                  onClick={() => {
-                    qc.invalidateQueries({ queryKey: ["videos"] });
-                    navigate({ to: "/watch/$id", params: { id: engine.savedId! } });
-                  }}
-                  className="ml-auto text-primary hover:underline"
-                >
-                  Open to sync →
-                </button>
+                <span className="ml-auto text-xs text-muted-foreground">
+                  Open the watch page to retry the upload.
+                </span>
               ) : engine.savedId ? (
                 <button
                   onClick={() => {
@@ -259,10 +251,6 @@ function RecordPage() {
                 </button>
               ) : null}
             </div>
-          ) : null}
-
-          {engine.savedLocalOnly && engine.lastDiag ? (
-            <CopyableDiagnostics diag={engine.lastDiag} />
           ) : null}
 
           <div className="grid gap-4 sm:grid-cols-2">
@@ -345,45 +333,5 @@ function SourceOption({
       <span className="text-sm font-semibold text-foreground">{label}</span>
       <span className="text-xs text-muted-foreground">{desc}</span>
     </button>
-  );
-}
-
-function CopyableDiagnostics({ diag }: { diag: SyncDiagnostics }) {
-  const text = diagnosticsToText(diag);
-  return (
-    <div
-      role="alert"
-      aria-live="assertive"
-      className="rounded-xl border border-destructive/50 bg-destructive/10 p-4 text-sm text-foreground ring-1 ring-destructive/30"
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <AlertTriangle className="size-4 shrink-0 text-destructive" />
-        <span className="font-semibold text-destructive">
-          Cloud sync failed — diagnostic details
-        </span>
-        <button
-          type="button"
-          onClick={() => {
-            navigator.clipboard?.writeText(text).then(
-              () => toast.success("Diagnostic details copied"),
-              () => toast.error("Could not copy — select the text manually"),
-            );
-          }}
-          className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-input bg-background px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent"
-        >
-          <Copy className="size-3.5" /> Copy
-        </button>
-      </div>
-      <p className="mt-2 text-xs text-muted-foreground">
-        Copy this block and paste it back so the exact failing stage can be diagnosed. The text
-        below is also selectable.
-      </p>
-      <pre
-        aria-label="Cloud sync diagnostic details"
-        className="mt-2 max-h-60 select-text overflow-auto rounded-lg border border-border/80 bg-background/80 p-3 font-mono text-[12px] leading-relaxed text-foreground"
-      >
-        {text}
-      </pre>
-    </div>
   );
 }

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Loader2, Eye, Clock, User, CloudUpload, Copy } from "lucide-react";
-import type { Comment, Reaction, SyncDiagnostics, Transcript } from "@/lib/types";
+import { AlertTriangle, Loader2, Eye, Clock, User, CloudUpload } from "lucide-react";
+import type { Comment, Reaction, Transcript } from "@/lib/types";
 import {
   fetchComments,
   fetchReactions,
@@ -18,13 +18,7 @@ import {
 } from "@/lib/storage-client";
 import { getBlob } from "@/lib/local-db";
 import { transcribeVideo } from "@/lib/transcript";
-import {
-  formatBytes,
-  formatDuration,
-  formatRelativeTime,
-  sourceTypeLabel,
-  diagnosticsToText,
-} from "@/lib/format";
+import { formatDuration, formatRelativeTime, sourceTypeLabel } from "@/lib/format";
 import { VideoPlayer, type VideoPlayerHandle } from "@/components/video-player";
 import { ShareBar } from "@/components/share-bar";
 import { CommentsPanel } from "@/components/comments-panel";
@@ -183,96 +177,26 @@ export function WatchContent({
   // works on other devices. Only possible on a device that still has the
   // IndexedDB blob (the original recorder). Preserves the id — no duplicate.
   const [syncing, setSyncing] = useState(false);
-  const [syncDiag, setSyncDiag] = useState<SyncDiagnostics | null>(null);
   const handleSyncToCloud = useCallback(async () => {
     if (!video.data) return;
     setSyncing(true);
-    setSyncDiag(null);
-    // Capture a diagnostic for EVERY failure path — including an unexpected
-    // throw from retryUpload (AbortError/network). Without this, the catch
-    // block below would only show a toast and the diagnostic block (with the
-    // real cause of the ~120s wait) would be lost — which is exactly what
-    // made the button "just revert to Sync to Cloud" with no details.
-    const startedAt = new Date().toISOString();
-    const startedAtMs = Date.now();
-    const recId = video.data.id;
-    let blobSize = 0;
-    let mime = video.data.mimeType;
-    let ext = video.data.ext;
     try {
       const blob = await getBlob(video.data.id);
       if (!blob || blob.size === 0) {
-        const diag: SyncDiagnostics = {
-          recordingId: recId,
-          stage: "local-cache",
-          failed: true,
-          blobSize: 0,
-          blobSizeMb: "0 B",
-          mimeType: mime,
-          ext,
-          elapsedMs: Date.now() - startedAtMs,
-          startedAt,
-          httpStatus: null,
-          errorKind: "local-cache-missing",
-          errorMessage:
-            "Local copy not found — sync is only possible on the device that recorded it.",
-          rawName: "LocalCache",
-        };
-        setSyncDiag(diag);
-        toast.error(diag.errorMessage ?? "Local copy not found.");
+        toast.error("Local copy not found — sync is only possible on the device that recorded it.");
         return;
       }
-      blobSize = blob.size;
       const res = await retryUpload(video.data, blob);
       if (res.localOnly) {
         toast.error(res.message ?? "Cloud upload failed. Try again later.");
-        if (res.diag) setSyncDiag(res.diag);
-        else
-          setSyncDiag({
-            recordingId: recId,
-            stage: "upload",
-            failed: true,
-            blobSize,
-            blobSizeMb: formatBytes(blobSize),
-            mimeType: mime,
-            ext,
-            elapsedMs: Date.now() - startedAtMs,
-            startedAt,
-            httpStatus: null,
-            errorKind: "unknown",
-            errorMessage: res.message ?? "Cloud upload failed.",
-            rawName: "RetryUpload",
-          });
       } else {
         toast.success("Synced to Cloud — the share link now works everywhere.");
         qc.invalidateQueries({ queryKey: ["videos"] });
         qc.invalidateQueries({ queryKey: ["video", videoId] });
         qc.invalidateQueries({ queryKey: ["video-object", videoId] });
-        setSyncDiag(null);
       }
     } catch (e) {
-      // Unexpected throw (e.g. the 120s AbortError fired by the client
-      // timeout). Preserve the sanitized diagnostic so the user can SEE why
-      // it waited two minutes and reverted — instead of a bare toast.
-      const name = e instanceof Error ? e.name : "Error";
-      const msg = e instanceof Error ? e.message : "Sync failed";
-      const isAbort = name === "AbortError";
-      setSyncDiag({
-        recordingId: recId,
-        stage: "unknown",
-        failed: true,
-        blobSize,
-        blobSizeMb: formatBytes(blobSize),
-        mimeType: mime,
-        ext,
-        elapsedMs: Date.now() - startedAtMs,
-        startedAt,
-        httpStatus: null,
-        errorKind: isAbort ? "fetch-aborted" : "network",
-        errorMessage: msg,
-        rawName: name,
-      });
-      toast.error(isAbort ? "Cloud upload timed out — see details below." : msg);
+      toast.error(e instanceof Error ? e.message : "Sync failed");
     } finally {
       setSyncing(false);
     }
@@ -440,43 +364,6 @@ export function WatchContent({
                 <CloudUpload className="size-3.5" />
                 Retry verify
               </button>
-            </div>
-          ) : null}
-          {syncDiag ? (
-            <div
-              role="alert"
-              aria-live="assertive"
-              className="rounded-xl border border-destructive/50 bg-destructive/10 p-4 text-sm text-foreground ring-1 ring-destructive/30"
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <AlertTriangle className="size-4 shrink-0 text-destructive" />
-                <span className="font-semibold text-destructive">
-                  Cloud sync failed — diagnostic details
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const text = diagnosticsToText(syncDiag);
-                    navigator.clipboard?.writeText(text).then(
-                      () => toast.success("Diagnostic details copied"),
-                      () => toast.error("Could not copy — select the text manually"),
-                    );
-                  }}
-                  className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-input bg-background px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent"
-                >
-                  <Copy className="size-3.5" /> Copy diagnostic details
-                </button>
-              </div>
-              <p className="mt-2 text-xs text-muted-foreground">
-                Copy this block and paste it back so the exact failing stage can be diagnosed. The
-                text below is also selectable.
-              </p>
-              <pre
-                aria-label="Cloud sync diagnostic details"
-                className="mt-2 max-h-60 select-text overflow-auto rounded-lg border border-border/80 bg-background/80 p-3 font-mono text-[12px] leading-relaxed text-foreground"
-              >
-                {diagnosticsToText(syncDiag)}
-              </pre>
             </div>
           ) : null}
           {urlError ? (
