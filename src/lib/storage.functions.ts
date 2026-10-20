@@ -2,7 +2,6 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import {
   createFolder as createFolderServer,
-  createUploadUrl as createUploadUrlServer,
   deleteFolder as deleteFolderServer,
   deleteVideo as deleteVideoServer,
   getStorageStatus as getStorageStatusServer,
@@ -38,10 +37,6 @@ export const saveVideoMeta = createServerFn({ method: "POST" })
     await saveVideoMetaServer(data.record as VideoRecord);
     return { ok: true };
   });
-
-export const createUploadUrl = createServerFn({ method: "POST" })
-  .validator((data) => z.object({ id: z.string(), ext: z.string() }).parse(data))
-  .handler(async ({ data }) => createUploadUrlServer(data.id, data.ext));
 
 export const uploadVideo = createServerFn({ method: "POST" })
   .validator((data) => z.object({ record: z.any(), base64: z.string() }).parse(data))

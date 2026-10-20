@@ -220,11 +220,7 @@ export function useRecordingEngine(qc: QueryClient): RecordingEngine {
     qc.invalidateQueries({ queryKey: ["videos"] });
     qc.invalidateQueries({ queryKey: ["storage-status"] });
     setSavedLocalOnly(Boolean(result.localOnly));
-    setSaveMsg(
-      result.localOnly
-        ? (result.message ?? "Saved locally (Cloud not reachable)")
-        : "Saved to Cloud",
-    );
+    setSaveMsg(result.localOnly ? "Saved locally (Cloud not reachable)" : "Saved to Cloud");
     setSavedId(result.record.id);
     toast.success(result.localOnly ? "Saved locally" : "Recording saved");
     setPhase("stopped");
