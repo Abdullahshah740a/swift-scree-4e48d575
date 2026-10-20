@@ -230,7 +230,7 @@ export function WatchContent({
         else
           setSyncDiag({
             recordingId: recId,
-            stage: "upload-proxy",
+            stage: "upload",
             failed: true,
             blobSize,
             blobSizeMb: formatBytes(blobSize),
@@ -259,7 +259,7 @@ export function WatchContent({
       const isAbort = name === "AbortError";
       setSyncDiag({
         recordingId: recId,
-        stage: "upload-proxy",
+        stage: "unknown",
         failed: true,
         blobSize,
         blobSizeMb: formatBytes(blobSize),

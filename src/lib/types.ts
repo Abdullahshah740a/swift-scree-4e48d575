@@ -127,7 +127,7 @@ export interface VideoObjectCheck {
  */
 export interface SyncDiagnostics {
   recordingId: string;
-  stage: "local-cache" | "upload-proxy" | "verify" | "done" | "unknown";
+  stage: "local-cache" | "sign-url" | "upload" | "metadata" | "verify" | "done" | "unknown";
   failed: boolean;
   blobSize: number;
   blobSizeMb: string;

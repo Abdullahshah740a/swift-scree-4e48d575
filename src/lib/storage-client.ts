@@ -136,10 +136,29 @@ export async function persistTranscript(transcript: Transcript): Promise<void> {
  * gateway's body path entirely; Supabase's storage CDN serves the upload
  * directly with its own range/streaming support.
  *
- * Returns true ONLY when the object was actually stored (verified by a HEAD
- * check after the PUT). Captures the real failing stage, elapsed time, HTTP
- * status, and a sanitized errorKind for the watch page's diagnostic block.
+ * Diagnostics split the upload into distinct stages so the exact failing
+ * point is visible, not lumped under one label:
+ *   - "sign-url": the server RPC that creates the signed upload URL (no
+ *     binary on the wire). A failure here means Cloud config/auth/routing,
+ *     NOT the gateway body path.
+ *   - "upload":  the direct PUT of the blob to the signed storage URL. A
+ *     timeout here (fetch-aborted / no response) is the gateway-stall
+ *     signature; an HTTP status is a storage rejection.
+ * Metadata ("metadata") and post-upload HEAD verification ("verify") are
+ * reported by the caller (saveRecording / retryUpload) under their own
+ * stages. The signed URL/token is NEVER included in a diagnostic — see
+ * redactSignedUrl, which scrubs any token/sig/signature/url query param.
+ *
+ * Returns true ONLY when the PUT returned 2xx (the object was accepted).
  */
+function redactSignedUrl(s: string | undefined | null): string {
+  if (!s) return "";
+  // Strip any query params that could carry a token/signature/signed URL so a
+  // diagnostic never leaks a credential. Cloud Storage error bodies don't
+  // normally include them, but this guarantees it before surfacing text.
+  return s.replace(/[?&][^&\s]*(token|sig|signature|url|secret)=[^&\s]*/gi, "[redacted]");
+}
+
 async function uploadBlobDirect(
   id: string,
   ext: string,
@@ -168,14 +187,14 @@ async function uploadBlobDirect(
   try {
     const signRes = await withTimeout(createUploadUrlFn({ data: { id, ext } }), 12000);
     if (!signRes?.ok || !signRes.url) {
-      const msg = signRes?.error ?? "Could not create signed upload URL.";
+      const msg = redactSignedUrl(signRes?.error ?? "Could not create signed upload URL.");
       console.warn("[upload] sign-url failed:", msg);
       return {
         ok: false,
         error: msg,
         diag: {
           ...base,
-          stage: "upload-proxy",
+          stage: "sign-url",
           failed: true,
           errorKind: "server-rejected",
           errorMessage: msg,
@@ -185,14 +204,14 @@ async function uploadBlobDirect(
     }
     signedUrl = signRes.url;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Sign URL transport error";
+    const msg = redactSignedUrl(e instanceof Error ? e.message : "Sign URL transport error");
     console.warn("[upload] sign-url threw:", msg);
     return {
       ok: false,
       error: msg,
       diag: {
         ...base,
-        stage: "upload-proxy",
+        stage: "sign-url",
         failed: true,
         errorKind: e instanceof Error && e.name === "AbortError" ? "fetch-aborted" : "network",
         errorMessage: msg,
@@ -202,7 +221,7 @@ async function uploadBlobDirect(
   }
 
   // 2) PUT the blob directly to the signed URL. Bounded so a stall surfaces as
-  //    a real HTTP status / abort message instead of hanging.
+  //    a real HTTP status / abort message instead of hanging indefinitely.
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120000);
   try {
@@ -217,7 +236,7 @@ async function uploadBlobDirect(
     });
     const elapsedMs = Date.now() - startedAtMs;
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
+      const text = redactSignedUrl(await res.text().catch(() => ""));
       const msg = `Upload failed (${res.status})${text ? `: ${text.slice(0, 200)}` : ""}`;
       console.warn("[upload] PUT failed:", res.status, text);
       return {
@@ -226,7 +245,7 @@ async function uploadBlobDirect(
         error: msg,
         diag: {
           ...base,
-          stage: "upload-proxy",
+          stage: "upload",
           failed: true,
           elapsedMs,
           httpStatus: res.status,
@@ -236,20 +255,20 @@ async function uploadBlobDirect(
         },
       };
     }
-    return { ok: true, diag: { ...base, stage: "upload-proxy", failed: false, elapsedMs } };
+    return { ok: true, diag: { ...base, stage: "upload", failed: false, elapsedMs } };
   } catch (e) {
     const elapsedMs = Date.now() - startedAtMs;
     const raw = e instanceof Error ? e.name : "Error";
     const isAbort = e instanceof Error && e.name === "AbortError";
     const kind = isAbort ? "fetch-aborted" : "network";
-    const msg = e instanceof Error ? e.message : "Upload transport error";
+    const msg = redactSignedUrl(e instanceof Error ? e.message : "Upload transport error");
     console.warn("[upload] PUT threw:", raw, msg);
     return {
       ok: false,
       error: msg,
       diag: {
         ...base,
-        stage: "upload-proxy",
+        stage: "upload",
         failed: true,
         elapsedMs,
         httpStatus: null,
@@ -319,7 +338,7 @@ export async function saveRecording(
         message: `Video uploaded, but metadata could not be saved${metaErr ? ` (${metaErr})` : ""}. Saved locally only — use “Sync to Cloud” to retry.`,
         diag: {
           recordingId: record.id,
-          stage: "done",
+          stage: "metadata",
           failed: true,
           blobSize: blob.size,
           blobSizeMb: formatBytes(blob.size),
@@ -427,7 +446,7 @@ export async function retryUpload(
         message: `Video uploaded, but metadata could not be saved${metaErr ? ` (${metaErr})` : ""}. Try again.`,
         diag: {
           recordingId: rec.id,
-          stage: "done",
+          stage: "metadata",
           failed: true,
           blobSize: blob.size,
           blobSizeMb: formatBytes(blob.size),
