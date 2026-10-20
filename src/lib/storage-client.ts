@@ -1,6 +1,5 @@
 import {
   createFolder as createFolderFn,
-  createUploadUrl as createUploadUrlFn,
   deleteFolder as deleteFolderFn,
   deleteVideo as deleteVideoFn,
   getStorageStatus as getStorageStatusFn,
@@ -52,9 +51,17 @@ export async function fetchStorageStatus(): Promise<StorageStatus> {
 }
 
 export async function fetchVideos(): Promise<VideoRecord[]> {
+  // Merge remote (cloud) + local (IndexedDB) so local-only recordings — whose
+  // cloud upload failed or never happened — stay visible alongside confirmed
+  // cloud recordings. Dedupe by id; the remote copy wins when both exist
+  // (it's the one other devices can play). A remote record that also has a
+  // local blob is NOT marked localOnly.
   const remote = await safeCall(listVideosFn(), []);
-  if (remote.length > 0) return remote;
-  return safeCall(getAllVideoMeta(), []);
+  const local = await safeCall(getAllVideoMeta(), []);
+  const byId = new Map<string, VideoRecord>();
+  for (const v of local) byId.set(v.id, { ...v, localOnly: true });
+  for (const v of remote) byId.set(v.id, { ...v, localOnly: false });
+  return Array.from(byId.values()).sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export async function fetchVideoMeta(id: string): Promise<VideoRecord | null> {
@@ -96,49 +103,43 @@ export async function persistTranscript(transcript: Transcript): Promise<void> {
 }
 
 /**
- * Upload a recording blob DIRECTLY to Cloud Storage using a signed upload URL
- * the server generates. The large video bytes never pass through the Edge
- * worker — base64-over-RPC hits the worker's payload limit for any real
- * recording and times out, which is why every save showed "Cloud not
- * reachable" / local-only. Returns true only when the object was actually
- * uploaded.
+ * Upload a recording blob through the SAME-ORIGIN upload proxy
+ * (/api/upload/$id). The proxy forwards the raw bytes to Cloud Storage with
+ * the service-role key server-side, so:
+ *   - no cross-origin PUT to the Supabase signed URL (which needs bucket CORS
+ *     the platform may not have configured → silent failures),
+ *   - no base64-over-RPC (which exceeds the Edge worker payload limit for any
+ *     real recording and times out — the original "Cloud not reachable"
+ *     symptom),
+ *   - the service-role key never reaches the browser.
+ * Returns true ONLY when the object was actually stored.
  */
-async function uploadBlobDirect(
+async function uploadBlobViaProxy(
   id: string,
   ext: string,
   blob: Blob,
   mime: string,
 ): Promise<boolean> {
-  const sign = await withTimeout(createUploadUrlFn({ data: { id, ext } }), 12000);
-  if (!sign.ok || !sign.url) {
-    console.warn("[upload] no signed URL:", sign.error);
-    return false;
-  }
-  // PUT the raw bytes straight to Cloud Storage. No apikey/Authorization
-  // header — the signed URL already carries the authorization token and
-  // Supabase rejects a request that also sends a service-role header on a
-  // signed upload. upsert=true so a retry of the same id replaces cleanly.
-  const uploadUrl = sign.url + (sign.url.includes("?") ? "&upsert=true" : "?upsert=true");
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60000);
+  const timer = setTimeout(() => controller.abort(), 120000);
   try {
-    const res = await fetch(uploadUrl, {
-      method: "PUT",
+    const res = await fetch(`/api/upload/${encodeURIComponent(id)}`, {
+      method: "POST",
       signal: controller.signal,
       headers: {
         "Content-Type": mime || "application/octet-stream",
-        "x-upsert": "true",
+        "x-ext": ext,
       },
       body: blob,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.warn("[upload] PUT failed:", res.status, text);
+      console.warn("[upload] proxy failed:", res.status, text);
       return false;
     }
     return true;
   } catch (e) {
-    console.warn("[upload] PUT threw:", e instanceof Error ? e.message : e);
+    console.warn("[upload] proxy threw:", e instanceof Error ? e.message : e);
     return false;
   } finally {
     clearTimeout(timer);
@@ -147,28 +148,35 @@ async function uploadBlobDirect(
 
 /**
  * Save a completed recording: upload blob + meta, and cache locally. Uploads
- * the blob directly to Cloud Storage via a signed URL (not base64-over-RPC,
- * which hit the Edge payload limit for real recordings). Only marks the
- * recording as shareable when the upload actually succeeded.
+ * the blob through the same-origin proxy (not base64-over-RPC, which hit the
+ * Edge payload limit for real recordings). Only marks the recording as
+ * shareable (localOnly=false) when BOTH the video object AND its metadata
+ * actually persisted to Cloud — so "Saved to Cloud" is never shown for a
+ * recording whose binary is missing.
  */
 export async function saveRecording(
   record: VideoRecord,
   blob: Blob,
 ): Promise<{ ok: boolean; localOnly: boolean; message: string | undefined }> {
-  // Always cache locally first so it works offline / without a backend.
+  // Always cache locally first so it works offline / without a backend, and
+  // so a failed cloud upload can be retried later from this device.
+  let localSaved = false;
   try {
     await putBlob(record.id, blob);
-    await putVideoMeta(record);
-  } catch {
-    /* local cache best-effort */
+    await putVideoMeta({ ...record, localOnly: true });
+    localSaved = true;
+  } catch (e) {
+    console.warn("[save] local cache failed:", e instanceof Error ? e.message : e);
   }
 
-  const uploaded = await uploadBlobDirect(record.id, record.ext, blob, record.mimeType);
+  const uploaded = await uploadBlobViaProxy(record.id, record.ext, blob, record.mimeType);
   if (uploaded) {
     // Meta is what makes the recording appear in the shared library. Only
-    // persist it once the video object exists, so a missing upload is never
-    // reported as an available recording on other devices.
-    const meta = await safeCall(saveVideoMetaFn({ data: { record } }), { ok: true });
+    // persist it once the video object exists, and mark it NOT localOnly.
+    const cloudRecord = { ...record, localOnly: false };
+    const meta = await safeCall(saveVideoMetaFn({ data: { record: cloudRecord } }), {
+      ok: true,
+    });
     if (!meta?.ok) {
       return {
         ok: true,
@@ -176,12 +184,20 @@ export async function saveRecording(
         message: "Uploaded video, but could not save metadata. Retrying soon.",
       };
     }
+    // Update the local cache to reflect the confirmed cloud state.
+    try {
+      await putVideoMeta(cloudRecord);
+    } catch {
+      /* best-effort */
+    }
     return { ok: true, localOnly: false, message: undefined };
   }
   return {
-    ok: true,
+    ok: localSaved,
     localOnly: true,
-    message: "Cloud upload failed — saved locally only.",
+    message: localSaved
+      ? "Cloud upload failed — saved locally only. Use “Sync to Cloud” to retry."
+      : "Cloud upload failed and local cache also failed. Recording may be lost.",
   };
 }
 
@@ -189,16 +205,18 @@ export async function saveRecording(
  * Re-upload a local-only recording's bytes to Cloud so it becomes shareable.
  * Used by the watch page's "Sync to Cloud" retry when the original upload
  * failed. Only available on a device that still has the IndexedDB blob.
+ * Preserves the recording's id (no duplicates).
  */
 export async function retryUpload(
   rec: VideoRecord,
   blob: Blob,
 ): Promise<{ ok: boolean; localOnly: boolean; message: string | undefined }> {
-  const uploaded = await uploadBlobDirect(rec.id, rec.ext, blob, rec.mimeType);
+  const uploaded = await uploadBlobViaProxy(rec.id, rec.ext, blob, rec.mimeType);
   if (uploaded) {
-    await safeCall(saveVideoMetaFn({ data: { record: rec } }), { ok: true });
+    const cloudRecord = { ...rec, localOnly: false };
+    await safeCall(saveVideoMetaFn({ data: { record: cloudRecord } }), { ok: true });
     try {
-      await putVideoMeta(rec);
+      await putVideoMeta(cloudRecord);
     } catch {
       /* best-effort */
     }

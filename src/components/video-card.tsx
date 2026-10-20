@@ -118,6 +118,14 @@ export function VideoCard({
             <span className="inline-flex items-center gap-1">
               <Clock className="size-3" /> {formatRelativeTime(video.createdAt)}
             </span>
+            {video.localOnly ? (
+              <span
+                className="inline-flex items-center gap-1 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold text-warning"
+                title="Cloud upload failed — only on this device"
+              >
+                Local only
+              </span>
+            ) : null}
             {moving ? (
               <span className="inline-flex items-center gap-1 text-primary">
                 <Loader2 className="size-3 animate-spin" /> Moving…

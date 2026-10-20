@@ -14,6 +14,7 @@ import { Route as LibraryRouteImport } from './routes/library'
 import { Route as RecordRouteImport } from './routes/record'
 import { Route as VIdRouteImport } from './routes/v.$id'
 import { Route as WatchIdRouteImport } from './routes/watch.$id'
+import { Route as ApiUploadIdRouteImport } from './routes/api/upload.$id'
 import { Route as ApiVideoIdRouteImport } from './routes/api/video.$id'
 
 const IndexRoute = IndexRouteImport.update({
@@ -41,6 +42,11 @@ const WatchIdRoute = WatchIdRouteImport.update({
   path: '/watch/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiUploadIdRoute = ApiUploadIdRouteImport.update({
+  id: '/api/upload/$id',
+  path: '/api/upload/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiVideoIdRoute = ApiVideoIdRouteImport.update({
   id: '/api/video/$id',
   path: '/api/video/$id',
@@ -53,6 +59,7 @@ export interface FileRoutesByFullPath {
   '/record': typeof RecordRoute
   '/v/$id': typeof VIdRoute
   '/watch/$id': typeof WatchIdRoute
+  '/api/upload/$id': typeof ApiUploadIdRoute
   '/api/video/$id': typeof ApiVideoIdRoute
 }
 export interface FileRoutesByTo {
@@ -61,6 +68,7 @@ export interface FileRoutesByTo {
   '/record': typeof RecordRoute
   '/v/$id': typeof VIdRoute
   '/watch/$id': typeof WatchIdRoute
+  '/api/upload/$id': typeof ApiUploadIdRoute
   '/api/video/$id': typeof ApiVideoIdRoute
 }
 export interface FileRoutesById {
@@ -70,14 +78,28 @@ export interface FileRoutesById {
   '/record': typeof RecordRoute
   '/v/$id': typeof VIdRoute
   '/watch/$id': typeof WatchIdRoute
+  '/api/upload/$id': typeof ApiUploadIdRoute
   '/api/video/$id': typeof ApiVideoIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/library' | '/record' | '/v/$id' | '/watch/$id' | '/api/video/$id'
+    | '/'
+    | '/library'
+    | '/record'
+    | '/v/$id'
+    | '/watch/$id'
+    | '/api/upload/$id'
+    | '/api/video/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/library' | '/record' | '/v/$id' | '/watch/$id' | '/api/video/$id'
+  to:
+    | '/'
+    | '/library'
+    | '/record'
+    | '/v/$id'
+    | '/watch/$id'
+    | '/api/upload/$id'
+    | '/api/video/$id'
   id:
     | '__root__'
     | '/'
@@ -85,6 +107,7 @@ export interface FileRouteTypes {
     | '/record'
     | '/v/$id'
     | '/watch/$id'
+    | '/api/upload/$id'
     | '/api/video/$id'
   fileRoutesById: FileRoutesById
 }
@@ -94,6 +117,7 @@ export interface RootRouteChildren {
   RecordRoute: typeof RecordRoute
   VIdRoute: typeof VIdRoute
   WatchIdRoute: typeof WatchIdRoute
+  ApiUploadIdRoute: typeof ApiUploadIdRoute
   ApiVideoIdRoute: typeof ApiVideoIdRoute
 }
 
@@ -134,6 +158,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WatchIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/upload/$id': {
+      id: '/api/upload/$id'
+      path: '/api/upload/$id'
+      fullPath: '/api/upload/$id'
+      preLoaderRoute: typeof ApiUploadIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/video/$id': {
       id: '/api/video/$id'
       path: '/api/video/$id'
@@ -150,6 +181,7 @@ const rootRouteChildren: RootRouteChildren = {
   RecordRoute: RecordRoute,
   VIdRoute: VIdRoute,
   WatchIdRoute: WatchIdRoute,
+  ApiUploadIdRoute: ApiUploadIdRoute,
   ApiVideoIdRoute: ApiVideoIdRoute,
 }
 export const routeTree = rootRouteImport

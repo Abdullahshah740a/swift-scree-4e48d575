@@ -15,6 +15,13 @@ export interface VideoRecord {
   views: number;
   createdAt: number;
   storagePath?: string; // videos/<id>.<ext>
+  /**
+   * True when the recording's bytes are only in this browser's IndexedDB —
+   * the cloud upload did not succeed (transport/payload/CORS failure). The
+   * library/watch UI surfaces this so the user knows the shared link won't
+   * work and can retry the sync. NOT set for confirmed cloud recordings.
+   */
+  localOnly?: boolean;
 }
 
 export interface Folder {

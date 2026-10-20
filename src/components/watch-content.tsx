@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Loader2, Eye, Clock, User } from "lucide-react";
+import { AlertTriangle, Loader2, Eye, Clock, User, CloudUpload } from "lucide-react";
 import type { Comment, Reaction, Transcript } from "@/lib/types";
 import {
   fetchComments,
@@ -13,7 +13,9 @@ import {
   persistTranscript,
   removeRecording,
   resolveVideoUrl,
+  retryUpload,
 } from "@/lib/storage-client";
+import { getBlob } from "@/lib/local-db";
 import { transcribeVideo } from "@/lib/transcript";
 import { formatDuration, formatRelativeTime, sourceTypeLabel } from "@/lib/format";
 import { VideoPlayer, type VideoPlayerHandle } from "@/components/video-player";
@@ -131,6 +133,34 @@ export function WatchContent({
     }
   }, [navigate, qc, video.data]);
 
+  // Re-upload a local-only recording's bytes to Cloud so the shared link
+  // works on other devices. Only possible on a device that still has the
+  // IndexedDB blob (the original recorder). Preserves the id — no duplicate.
+  const [syncing, setSyncing] = useState(false);
+  const handleSyncToCloud = useCallback(async () => {
+    if (!video.data) return;
+    setSyncing(true);
+    try {
+      const blob = await getBlob(video.data.id);
+      if (!blob || blob.size === 0) {
+        toast.error("Local copy not found — sync is only possible on the device that recorded it.");
+        return;
+      }
+      const res = await retryUpload(video.data, blob);
+      if (res.localOnly) {
+        toast.error(res.message ?? "Cloud upload failed. Try again later.");
+      } else {
+        toast.success("Synced to Cloud — the share link now works everywhere.");
+        qc.invalidateQueries({ queryKey: ["videos"] });
+        qc.invalidateQueries({ queryKey: ["video", videoId] });
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  }, [qc, video.data, videoId]);
+
   const [genState, setGenState] = useState<{
     generating: boolean;
     progress: { pct: number; msg: string } | null;
@@ -214,6 +244,31 @@ export function WatchContent({
     <div className={chromeless ? "" : "mx-auto max-w-6xl px-4 py-6"}>
       <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
         <div className="flex flex-col gap-3">
+          {rec.localOnly ? (
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex flex-wrap items-center gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-foreground"
+            >
+              <AlertTriangle className="size-4 shrink-0 text-warning" />
+              <span className="flex-1">
+                Local only — the cloud upload failed, so the share link won't play on other devices.
+              </span>
+              <button
+                type="button"
+                onClick={handleSyncToCloud}
+                disabled={syncing}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
+              >
+                {syncing ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <CloudUpload className="size-3.5" />
+                )}
+                {syncing ? "Syncing…" : "Sync to Cloud"}
+              </button>
+            </div>
+          ) : null}
           {urlError ? (
             <div className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-foreground">
               <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" />
