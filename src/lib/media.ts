@@ -3,16 +3,23 @@ import type { SourceType } from "./types";
 
 /**
  * Choose a MediaRecorder mimeType the browser can actually ENCODE for the
- * given stream, prioritizing BROAD playback compatibility so share links play
- * on phones too.
+ * given stream.
  *
- * Why MP4 first: iOS Safari cannot decode WebM (VP9/VP8) in <video>, so a WebM
- * recording plays for the sender (desktop Chrome/Firefox) but fails with
- * "source not supported" on an iPhone. MP4 (H.264 + AAC / `avc1,mp4a.40.2`)
- * plays in iOS Safari, Android Chrome, and desktop Chrome/Firefox/Safari/Edge
- * — so it is tried first wherever the browser can RECORD it (Chrome, Safari,
- * Edge). Firefox cannot record MP4 and falls through to the WebM candidates
- * below.
+ * COMPATIBILITY CHANGE (AWAITING VALIDATION — NOT A CONFIRMED ROOT-CAUSE FIX):
+ * This now tries MP4 (H.264 + AAC, `avc1,mp4a.40.2`) before WebM, so that new
+ * recordings play on more devices (e.g. phones whose browsers may not decode
+ * WebM/VP9). This is a forward-looking change for FUTURE recordings only; it
+ * does not repair existing WebM recordings and does not by itself prove that
+ * a past share-link failure was a codec problem.
+ *
+ * CAUTION — known fragmented-MP4 risk: the original code preferred WebM and
+ * noted that Chrome's MediaRecorder MP4 output is fragmented and could fail
+ * to play back without a transcode/remux. MP4 is tried first ONLY where the
+ * browser reports it can RECORD it (Chrome, Safari, Edge); Firefox cannot
+ * record MP4 and falls through to the WebM candidates. The actual output must
+ * be validated per browser: a new MP4 recording should be checked for remote
+ * video, audio, and seeking before this preference is treated as confirmed.
+ * If fragmented-MP4 playback problems reappear, WebM should be re-prioritized.
  *
  * The codec string MUST match the stream's tracks: a video-only capture
  * recorded with an Opus audio codec can produce ZERO chunks in some Chrome
@@ -28,9 +35,10 @@ export function pickMimeType(hasAudio = true): { mimeType: string; ext: string }
 
   const candidates: Array<{ mimeType: string; ext: string }> = [];
 
-  // 1) MP4 (H.264 + AAC) — broadly compatible incl. iOS Safari. The bare
+  // 1) MP4 (H.264 + AAC) — broader device compatibility. The bare
   //    `video/mp4` entry lets the browser pick codecs itself if the explicit
-  //    strings are rejected by isTypeSupported.
+  //    strings are rejected by isTypeSupported. See the caution above re:
+  //    fragmented-MP4 playback; this preference is awaiting validation.
   candidates.push({
     mimeType: hasAudio ? `video/mp4;codecs=avc1,mp4a.40.2` : `video/mp4;codecs=avc1`,
     ext: "mp4",
