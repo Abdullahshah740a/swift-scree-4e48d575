@@ -6,9 +6,9 @@ import { VideoCard } from "@/components/video-card";
 import {
   fetchFolders,
   fetchVideos,
-  persistFolders,
   persistVideoMeta,
   removeRecording,
+  saveFoldersStrict,
 } from "@/lib/storage-client";
 import type { Folder, VideoRecord } from "@/lib/types";
 import { toast } from "sonner";
@@ -47,13 +47,31 @@ function Library() {
   const deleteFolderMut = useMutation({
     mutationFn: async (folderId: string) => {
       const next = allFolders.filter((f) => f.id !== folderId);
-      await persistFolders(next);
+      await saveFoldersStrict(next);
+    },
+    onMutate: async (folderId) => {
+      await qc.cancelQueries({ queryKey: ["folders"] });
+      const prev = qc.getQueryData<Folder[]>(["folders"]);
+      if (prev) {
+        qc.setQueryData<Folder[]>(
+          ["folders"],
+          prev.filter((f) => f.id !== folderId),
+        );
+      }
+      return { prev };
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["folders"] });
       qc.invalidateQueries({ queryKey: ["videos"] });
       setActiveFolder("all");
       toast.success("Folder deleted");
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.prev) qc.setQueryData(["folders"], ctx.prev);
+      toast.error("Could not delete folder — try again");
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["folders"] });
     },
   });
 
@@ -64,11 +82,28 @@ function Library() {
         name,
         createdAt: Date.now(),
       };
-      await persistFolders([...allFolders, folder]);
+      await saveFoldersStrict([...allFolders, folder]);
+    },
+    onMutate: async (name) => {
+      // Optimistically add the folder so it appears instantly; roll back on error.
+      await qc.cancelQueries({ queryKey: ["folders"] });
+      const prev = qc.getQueryData<Folder[]>(["folders"]);
+      if (prev) {
+        const next: Folder[] = [...prev, { id: crypto.randomUUID(), name, createdAt: Date.now() }];
+        qc.setQueryData<Folder[]>(["folders"], next);
+      }
+      return { prev };
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["folders"] });
       toast.success("Folder created");
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.prev) qc.setQueryData(["folders"], ctx.prev);
+      toast.error("Could not create folder — try again");
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["folders"] });
     },
   });
 

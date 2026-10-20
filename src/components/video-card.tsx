@@ -28,7 +28,7 @@ export function VideoCard({
   folders: Folder[];
   onDelete?: ((video: VideoRecord) => void) | undefined;
   onMove?: ((video: VideoRecord, folderId: string | null) => void) | undefined;
-  compact?: boolean;
+  compact?: boolean | undefined;
   moving?: boolean | undefined;
 }) {
   return (
@@ -153,7 +153,7 @@ function CardMenu({
   folders: Folder[];
   onDelete?: ((video: VideoRecord) => void) | undefined;
   onMove?: ((video: VideoRecord, folderId: string | null) => void) | undefined;
-  compact?: boolean;
+  compact?: boolean | undefined;
   moving?: boolean | undefined;
 }) {
   return (
