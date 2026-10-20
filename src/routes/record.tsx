@@ -12,11 +12,13 @@ import {
   Loader2,
   AlertTriangle,
   RefreshCw,
+  Copy,
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRecordingEngine } from "@/hooks/use-recording";
-import { sourceTypeLabel } from "@/lib/format";
-import type { SourceType } from "@/lib/types";
+import { sourceTypeLabel, diagnosticsToText } from "@/lib/format";
+import type { SyncDiagnostics, SourceType } from "@/lib/types";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/record")({
   head: () => ({
@@ -259,6 +261,10 @@ function RecordPage() {
             </div>
           ) : null}
 
+          {engine.savedLocalOnly && engine.lastDiag ? (
+            <CopyableDiagnostics diag={engine.lastDiag} />
+          ) : null}
+
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium text-foreground">Title</label>
@@ -339,5 +345,31 @@ function SourceOption({
       <span className="text-sm font-semibold text-foreground">{label}</span>
       <span className="text-xs text-muted-foreground">{desc}</span>
     </button>
+  );
+}
+
+function CopyableDiagnostics({ diag }: { diag: SyncDiagnostics }) {
+  const text = diagnosticsToText(diag);
+  return (
+    <div className="rounded-lg border border-border/60 bg-card/60 p-3 text-xs text-foreground">
+      <div className="flex items-center gap-2">
+        <span className="font-semibold">Cloud sync failed — diagnostic details</span>
+        <button
+          type="button"
+          onClick={() => {
+            navigator.clipboard?.writeText(text).then(
+              () => toast.success("Diagnostic details copied"),
+              () => toast.error("Could not copy — select the text manually"),
+            );
+          }}
+          className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-input bg-background px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+        >
+          <Copy className="size-3.5" /> Copy
+        </button>
+      </div>
+      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground">
+        {text}
+      </pre>
+    </div>
   );
 }

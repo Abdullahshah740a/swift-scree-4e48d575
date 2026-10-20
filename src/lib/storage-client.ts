@@ -26,6 +26,7 @@ import {
   putBlob,
   putVideoMeta,
 } from "./local-db";
+import { formatBytes } from "./format";
 import type {
   Comment,
   Folder,
@@ -33,6 +34,7 @@ import type {
   MoveResult,
   Reaction,
   StorageStatus,
+  SyncDiagnostics,
   Transcript,
   VideoObjectCheck,
   VideoRecord,
@@ -137,16 +139,46 @@ export async function persistTranscript(transcript: Transcript): Promise<void> {
  *     symptom),
  *   - the service-role key never reaches the browser.
  * Returns true ONLY when the object was actually stored.
+ *
+ * Diagnostics: captures the real failing stage (upload-proxy), the elapsed
+ * time, the HTTP status when there was a response, and a sanitized
+ * errorKind distinguishing a client timeout (fetch-aborted), a network
+ * failure, and a server rejection — so the watch page can surface a
+ * copyable diagnostic block instead of a generic "Local only" banner that
+ * hides the cause of the 120s wait.
  */
 async function uploadBlobViaProxy(
   id: string,
   ext: string,
   blob: Blob,
   mime: string,
-): Promise<{ ok: boolean; status?: number; error?: string }> {
+): Promise<{
+  ok: boolean;
+  status?: number;
+  error?: string;
+  diag: SyncDiagnostics;
+}> {
+  const startedAtMs = Date.now();
+  const startedAtIso = new Date(startedAtMs).toISOString();
+  const base: Omit<SyncDiagnostics, "failed" | "stage"> = {
+    recordingId: id,
+    blobSize: blob.size,
+    blobSizeMb: formatBytes(blob.size),
+    mimeType: mime,
+    ext,
+    elapsedMs: null,
+    startedAt: startedAtIso,
+    httpStatus: null,
+    errorKind: "ok",
+    errorMessage: null,
+    rawName: null,
+  };
   const controller = new AbortController();
   // 120s is generous for a real recording over a streamed same-origin POST;
-  // a stall still aborts rather than hanging the save.
+  // a stall still aborts rather than hanging the save. When this fires the
+  // fetch rejects with a DOMException named "AbortError" — surfaced as
+  // errorKind "fetch-aborted" so the user can tell a timeout from a storage
+  // rejection (which would carry an HTTP status).
   const timer = setTimeout(() => controller.abort(), 120000);
   try {
     const res = await fetch(`/api/upload/${encodeURIComponent(id)}`, {
@@ -158,11 +190,26 @@ async function uploadBlobViaProxy(
       },
       body: blob,
     });
+    const elapsedMs = Date.now() - startedAtMs;
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       const msg = `Upload proxy ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`;
       console.warn("[upload] proxy failed:", res.status, text);
-      return { ok: false, status: res.status, error: msg };
+      return {
+        ok: false,
+        status: res.status,
+        error: msg,
+        diag: {
+          ...base,
+          stage: "upload-proxy",
+          failed: true,
+          elapsedMs,
+          httpStatus: res.status,
+          errorKind: "server-rejected",
+          errorMessage: msg,
+          rawName: "Response",
+        },
+      };
     }
     // The proxy returns {ok, storagePath, ext}. A non-ok body is a server
     // error even over HTTP 200 (defensive — the proxy returns 502 on failure,
@@ -170,16 +217,53 @@ async function uploadBlobViaProxy(
     try {
       const data = (await res.json()) as { ok?: boolean };
       if (data?.ok === false) {
-        return { ok: false, status: res.status, error: "Upload proxy reported failure." };
+        const elapsed2 = Date.now() - startedAtMs;
+        return {
+          ok: false,
+          status: res.status,
+          error: "Upload proxy reported failure.",
+          diag: {
+            ...base,
+            stage: "upload-proxy",
+            failed: true,
+            elapsedMs: elapsed2,
+            httpStatus: res.status,
+            errorKind: "server-rejected",
+            errorMessage: "Upload proxy reported failure (ok=false).",
+            rawName: "Response",
+          },
+        };
       }
     } catch {
       /* body not JSON — treat the 200 as success */
     }
-    return { ok: true };
+    return {
+      ok: true,
+      diag: { ...base, stage: "upload-proxy", failed: false, elapsedMs },
+    };
   } catch (e) {
+    const elapsedMs = Date.now() - startedAtMs;
+    const raw = e instanceof Error ? e.name : "Error";
+    // DOMException("AbortError") = the 120s client timeout fired; a
+    // TypeError/other = a genuine network failure before any response.
+    const isAbort = e instanceof Error && e.name === "AbortError";
+    const kind = isAbort ? "fetch-aborted" : "network";
     const msg = e instanceof Error ? e.message : "Upload transport error";
-    console.warn("[upload] proxy threw:", msg);
-    return { ok: false, error: msg };
+    console.warn("[upload] proxy threw:", raw, msg);
+    return {
+      ok: false,
+      error: msg,
+      diag: {
+        ...base,
+        stage: "upload-proxy",
+        failed: true,
+        elapsedMs,
+        httpStatus: null,
+        errorKind: kind,
+        errorMessage: msg,
+        rawName: raw,
+      },
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -196,7 +280,13 @@ async function uploadBlobViaProxy(
 export async function saveRecording(
   record: VideoRecord,
   blob: Blob,
-): Promise<{ ok: boolean; localOnly: boolean; message: string | undefined; verified?: boolean }> {
+): Promise<{
+  ok: boolean;
+  localOnly: boolean;
+  message: string | undefined;
+  verified?: boolean;
+  diag: SyncDiagnostics | null;
+}> {
   // Always cache locally first so it works offline / without a backend, and
   // so a failed cloud upload can be retried later from this device.
   let localSaved = false;
@@ -233,6 +323,21 @@ export async function saveRecording(
         ok: true,
         localOnly: true,
         message: `Video uploaded, but metadata could not be saved${metaErr ? ` (${metaErr})` : ""}. Saved locally only — use “Sync to Cloud” to retry.`,
+        diag: {
+          recordingId: record.id,
+          stage: "done",
+          failed: true,
+          blobSize: blob.size,
+          blobSizeMb: formatBytes(blob.size),
+          mimeType: record.mimeType,
+          ext: record.ext,
+          elapsedMs: null,
+          startedAt: new Date().toISOString(),
+          httpStatus: null,
+          errorKind: "server-rejected",
+          errorMessage: metaErr ?? "Metadata save did not confirm.",
+          rawName: "MetaSave",
+        },
       };
     }
     // Update the local cache to reflect the confirmed cloud state.
@@ -247,6 +352,7 @@ export async function saveRecording(
     // the stored bytes match the source. Never blocks the save — a
     // missing/unknown check logs and falls back to "uploaded but unverified".
     let verified = false;
+    let verifyDiag: SyncDiagnostics | null = null;
     try {
       const check = await fetchVideoObjectStatus(record.id, record.ext);
       if (check.status === "present" && check.size !== null) {
@@ -260,10 +366,25 @@ export async function saveRecording(
       } else if (check.status === "missing") {
         console.warn("[save] object reported missing right after upload");
       }
+      verifyDiag = {
+        recordingId: record.id,
+        stage: "verify",
+        failed: check.status !== "present" || (check.size !== null && check.size !== blob.size),
+        blobSize: blob.size,
+        blobSizeMb: formatBytes(blob.size),
+        mimeType: record.mimeType,
+        ext: record.ext,
+        elapsedMs: null,
+        startedAt: new Date().toISOString(),
+        httpStatus: null,
+        errorKind: check.status === "present" ? "ok" : check.status,
+        errorMessage: check.error ?? null,
+        rawName: null,
+      };
     } catch {
       /* verification unavailable — uploaded but unverified */
     }
-    return { ok: true, localOnly: false, message: undefined, verified };
+    return { ok: true, localOnly: false, message: undefined, verified, diag: verifyDiag };
   }
   // Upload failed. Preserve the real error so the user sees the actual cause
   // (transport, proxy 5xx, etc.) instead of a generic "Cloud not reachable".
@@ -274,6 +395,7 @@ export async function saveRecording(
     message: localSaved
       ? `${reason} Saved locally only — use “Sync to Cloud” to retry.`
       : `${reason} Local cache also failed${localErr ? ` (${localErr})` : ""}.`,
+    diag: upload.diag,
   };
 }
 
@@ -291,6 +413,7 @@ export async function retryUpload(
   localOnly: boolean;
   message: string | undefined;
   verified?: boolean;
+  diag: SyncDiagnostics | null;
 }> {
   const upload = await uploadBlobViaProxy(rec.id, rec.ext, blob, rec.mimeType);
   if (upload.ok) {
@@ -310,6 +433,21 @@ export async function retryUpload(
         ok: false,
         localOnly: true,
         message: `Video uploaded, but metadata could not be saved${metaErr ? ` (${metaErr})` : ""}. Try again.`,
+        diag: {
+          recordingId: rec.id,
+          stage: "done",
+          failed: true,
+          blobSize: blob.size,
+          blobSizeMb: formatBytes(blob.size),
+          mimeType: rec.mimeType,
+          ext: rec.ext,
+          elapsedMs: null,
+          startedAt: new Date().toISOString(),
+          httpStatus: null,
+          errorKind: "server-rejected",
+          errorMessage: metaErr ?? "Metadata save did not confirm.",
+          rawName: "MetaSave",
+        },
       };
     }
     try {
@@ -321,6 +459,7 @@ export async function retryUpload(
     // retry does not by itself prove the stored bytes match — compare the
     // object's content-length to the source Blob where available.
     let verified = false;
+    let verifyDiag: SyncDiagnostics | null = null;
     try {
       const check = await fetchVideoObjectStatus(rec.id, rec.ext);
       if (check.status === "present" && check.size !== null) {
@@ -332,15 +471,31 @@ export async function retryUpload(
           });
         }
       }
+      verifyDiag = {
+        recordingId: rec.id,
+        stage: "verify",
+        failed: check.status !== "present" || (check.size !== null && check.size !== blob.size),
+        blobSize: blob.size,
+        blobSizeMb: formatBytes(blob.size),
+        mimeType: rec.mimeType,
+        ext: rec.ext,
+        elapsedMs: null,
+        startedAt: new Date().toISOString(),
+        httpStatus: null,
+        errorKind: check.status === "present" ? "ok" : check.status,
+        errorMessage: check.error ?? null,
+        rawName: null,
+      };
     } catch {
       /* verification unavailable — uploaded but unverified */
     }
-    return { ok: true, localOnly: false, message: undefined, verified };
+    return { ok: true, localOnly: false, message: undefined, verified, diag: verifyDiag };
   }
   return {
     ok: false,
     localOnly: true,
     message: upload.error ?? "Cloud upload failed. Try again later.",
+    diag: upload.diag,
   };
 }
 

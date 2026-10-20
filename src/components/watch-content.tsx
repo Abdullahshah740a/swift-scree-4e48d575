@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Loader2, Eye, Clock, User, CloudUpload } from "lucide-react";
-import type { Comment, Reaction, Transcript } from "@/lib/types";
+import { AlertTriangle, Loader2, Eye, Clock, User, CloudUpload, Copy } from "lucide-react";
+import type { Comment, Reaction, SyncDiagnostics, Transcript } from "@/lib/types";
 import {
   fetchComments,
   fetchReactions,
@@ -18,7 +18,12 @@ import {
 } from "@/lib/storage-client";
 import { getBlob } from "@/lib/local-db";
 import { transcribeVideo } from "@/lib/transcript";
-import { formatDuration, formatRelativeTime, sourceTypeLabel } from "@/lib/format";
+import {
+  formatDuration,
+  formatRelativeTime,
+  sourceTypeLabel,
+  diagnosticsToText,
+} from "@/lib/format";
 import { VideoPlayer, type VideoPlayerHandle } from "@/components/video-player";
 import { ShareBar } from "@/components/share-bar";
 import { CommentsPanel } from "@/components/comments-panel";
@@ -177,9 +182,11 @@ export function WatchContent({
   // works on other devices. Only possible on a device that still has the
   // IndexedDB blob (the original recorder). Preserves the id — no duplicate.
   const [syncing, setSyncing] = useState(false);
+  const [syncDiag, setSyncDiag] = useState<SyncDiagnostics | null>(null);
   const handleSyncToCloud = useCallback(async () => {
     if (!video.data) return;
     setSyncing(true);
+    setSyncDiag(null);
     try {
       const blob = await getBlob(video.data.id);
       if (!blob || blob.size === 0) {
@@ -189,11 +196,13 @@ export function WatchContent({
       const res = await retryUpload(video.data, blob);
       if (res.localOnly) {
         toast.error(res.message ?? "Cloud upload failed. Try again later.");
+        if (res.diag) setSyncDiag(res.diag);
       } else {
         toast.success("Synced to Cloud — the share link now works everywhere.");
         qc.invalidateQueries({ queryKey: ["videos"] });
         qc.invalidateQueries({ queryKey: ["video", videoId] });
         qc.invalidateQueries({ queryKey: ["video-object", videoId] });
+        setSyncDiag(null);
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Sync failed");
@@ -364,6 +373,29 @@ export function WatchContent({
                 <CloudUpload className="size-3.5" />
                 Retry verify
               </button>
+            </div>
+          ) : null}
+          {syncDiag ? (
+            <div className="rounded-xl border border-border/60 bg-card/60 p-3 text-xs text-foreground">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold">Cloud sync failed — diagnostic details</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const text = diagnosticsToText(syncDiag);
+                    navigator.clipboard?.writeText(text).then(
+                      () => toast.success("Diagnostic details copied"),
+                      () => toast.error("Could not copy — select the text manually"),
+                    );
+                  }}
+                  className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-input bg-background px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+                >
+                  <Copy className="size-3.5" /> Copy diagnostic details
+                </button>
+              </div>
+              <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground">
+                {diagnosticsToText(syncDiag)}
+              </pre>
             </div>
           ) : null}
           {urlError ? (

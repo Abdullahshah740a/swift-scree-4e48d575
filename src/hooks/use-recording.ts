@@ -14,7 +14,7 @@ import { extFromMime } from "@/lib/format";
 import { persistVideoMeta } from "@/lib/storage-client";
 import { finalizeAndSaveRecording } from "@/lib/recording-save";
 import { toast } from "sonner";
-import type { SourceType, VideoRecord } from "@/lib/types";
+import type { SourceType, SyncDiagnostics, VideoRecord } from "@/lib/types";
 
 export type RecordingPhase = "idle" | "recording" | "finalizing" | "saving" | "stopped";
 
@@ -40,6 +40,7 @@ export interface RecordingEngine {
   savedLocalOnly: boolean;
   saveMsg: string | null;
   chosenMime: string;
+  lastDiag: SyncDiagnostics | null;
   start: (opts: StartOptions) => Promise<void>;
   stop: () => void;
   pause: () => void;
@@ -63,6 +64,7 @@ export function useRecordingEngine(qc: QueryClient): RecordingEngine {
   const [savedLocalOnly, setSavedLocalOnly] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [chosenMime, setChosenMime] = useState("video/webm");
+  const [lastDiag, setLastDiag] = useState<SyncDiagnostics | null>(null);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
@@ -226,6 +228,7 @@ export function useRecordingEngine(qc: QueryClient): RecordingEngine {
         : "Saved to Cloud",
     );
     setSavedId(result.record.id);
+    setLastDiag(result.diag ?? null);
     toast.success(result.localOnly ? "Saved locally" : "Recording saved");
     setPhase("stopped");
   }
@@ -461,6 +464,7 @@ export function useRecordingEngine(qc: QueryClient): RecordingEngine {
     setSaveMsg(null);
     setElapsed(0);
     setPaused(false);
+    setLastDiag(null);
   }, []);
 
   const updateDetails = useCallback(
@@ -501,6 +505,7 @@ export function useRecordingEngine(qc: QueryClient): RecordingEngine {
     savedLocalOnly,
     saveMsg,
     chosenMime,
+    lastDiag,
     start,
     stop,
     pause,

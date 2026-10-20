@@ -38,6 +38,13 @@ export const Route = createFileRoute("/api/upload/$id")({
     handlers: {
       POST: async ({ params, request }) => {
         const id = String((params as { id?: string }).id ?? "");
+        const startedAt = Date.now();
+        const log = (stage: string, extra?: Record<string, unknown>) =>
+          console.info(
+            `[upload-proxy] id=${id} stage=${stage} elapsed=${Date.now() - startedAt}ms`,
+            extra ?? "",
+          );
+
         if (!id) return new Response("Missing id", { status: 400 });
 
         const contentType = request.headers.get("content-type") ?? "application/octet-stream";
@@ -45,6 +52,7 @@ export const Route = createFileRoute("/api/upload/$id")({
 
         const { url, key, bucket } = env();
         if (!url || !key || !bucket) {
+          log("not-configured");
           return new Response("Storage not configured", { status: 502 });
         }
 
@@ -55,7 +63,10 @@ export const Route = createFileRoute("/api/upload/$id")({
           .max(200)
           .regex(/^[a-zA-Z0-9_-]+$/);
         const parsed = idSchema.safeParse(id);
-        if (!parsed.success) return new Response("Invalid id", { status: 400 });
+        if (!parsed.success) {
+          log("invalid-id");
+          return new Response("Invalid id", { status: 400 });
+        }
 
         const ext = String(expectedExt).toLowerCase().endsWith("mp4") ? "mp4" : "webm";
         const objectPath = `videos/${parsed.data}.${ext}`;
@@ -68,6 +79,7 @@ export const Route = createFileRoute("/api/upload/$id")({
         )}`;
 
         try {
+          log("proxy-start", { bytes: request.headers.get("content-length") });
           const uploadRes = await fetch(uploadUrl, {
             method: "POST",
             headers: {
@@ -84,11 +96,12 @@ export const Route = createFileRoute("/api/upload/$id")({
 
           if (!uploadRes.ok) {
             const text = await uploadRes.text().catch(() => "");
-            console.warn("[upload-proxy] object POST failed:", uploadRes.status, text);
+            log("storage-rejected", { status: uploadRes.status, body: text.slice(0, 200) });
             return new Response(`Upload failed (${uploadRes.status})`, { status: 502 });
           }
+          log("storage-ok", { status: uploadRes.status });
         } catch (e) {
-          console.warn("[upload-proxy] object POST threw:", e instanceof Error ? e.message : e);
+          log("storage-threw", { name: e instanceof Error ? e.name : "Error" });
           return new Response("Upload failed (transport)", { status: 502 });
         }
 

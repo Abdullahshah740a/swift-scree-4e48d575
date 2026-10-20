@@ -1,4 +1,30 @@
 import type { SourceType } from "./types";
+import type { SyncDiagnostics } from "./types";
+
+/**
+ * Render a SyncDiagnostics record as a plain, copyable diagnostic text block
+ * the user can paste back. Contains NO credentials, signed tokens, auth
+ * headers, or video bytes — only sanitized correlation metadata. When
+ * `fetch` failed before any response, httpStatus stays null and we say so
+ * explicitly (we never invent an HTTP status or call it a storage rejection).
+ */
+export function diagnosticsToText(d: SyncDiagnostics): string {
+  const lines = [
+    `Swift Screen — cloud sync diagnostic`,
+    `Recording ID: ${d.recordingId}`,
+    `Stage: ${d.stage}${d.failed ? " (failed)" : ""}`,
+    `Blob size: ${d.blobSize} bytes (${d.blobSizeMb})`,
+    `MIME type: ${d.mimeType}`,
+    `Extension: ${d.ext}`,
+    `Started at: ${d.startedAt}`,
+    `Elapsed: ${d.elapsedMs === null ? "unknown" : `${d.elapsedMs} ms`}`,
+    `HTTP status: ${d.httpStatus === null ? "no response (fetch failed before any HTTP response)" : d.httpStatus}`,
+    `Error kind: ${d.errorKind}`,
+    `Error message: ${d.errorMessage ?? "none"}`,
+    `Error name: ${d.rawName ?? "none"}`,
+  ];
+  return lines.join("\n");
+}
 
 export function formatDuration(totalSeconds: number): string {
   if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return "0:00";

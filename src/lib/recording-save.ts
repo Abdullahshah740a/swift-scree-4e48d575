@@ -15,6 +15,7 @@ export interface FinalizeResult {
   record?: VideoRecord | undefined;
   localOnly?: boolean | undefined;
   message?: string | undefined;
+  diag?: import("./types").SyncDiagnostics | null;
 }
 
 /**
@@ -78,6 +79,7 @@ export async function finalizeAndSaveRecording(
       localOnly: result.localOnly,
     };
     if (result.message !== undefined) out.message = result.message;
+    out.diag = result.diag ?? null;
     return out;
   } catch (e) {
     console.error("[record] save failed", e);
@@ -86,6 +88,21 @@ export async function finalizeAndSaveRecording(
       record,
       localOnly: true,
       message: "Cloud upload failed — saved locally only.",
+      diag: {
+        recordingId: record.id,
+        stage: "unknown",
+        failed: true,
+        blobSize: blob.size,
+        blobSizeMb: `${(blob.size / 1024 / 1024).toFixed(1)} MB`,
+        mimeType: mime,
+        ext: record.ext,
+        elapsedMs: null,
+        startedAt: new Date().toISOString(),
+        httpStatus: null,
+        errorKind: e instanceof Error ? e.name : "Error",
+        errorMessage: e instanceof Error ? e.message : "Save threw",
+        rawName: e instanceof Error ? e.name : null,
+      },
     };
   }
 }
