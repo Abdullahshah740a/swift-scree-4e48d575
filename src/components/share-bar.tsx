@@ -34,7 +34,7 @@ export function ShareBar({
     setDownloading(true);
     try {
       await triggerVideoDownload(video);
-      toast.success(`Downloading ${video.ext || "webm"}…`);
+      toast.success("Downloading mp4…");
     } catch (e) {
       toast.error("Could not start download");
       console.error("[share-bar] download failed", e);
@@ -64,7 +64,7 @@ export function ShareBar({
         onClick={handleDownload}
         disabled={downloading}
         className="inline-flex items-center gap-2 rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-60"
-        title={`Download .${video.ext || "webm"}`}
+        title="Download .mp4"
       >
         <Download className="size-4" /> {downloading ? "Downloading…" : "Download"}
       </button>

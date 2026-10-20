@@ -81,7 +81,10 @@ export const Route = createFileRoute("/api/video/$id")({
             }
             const headers = new Headers();
             headers.set("Content-Type", rec.mimeType || extForMime(rec.mimeType));
-            const filename = `${slugify(rec.title)}.${rec.ext || extForMime(rec.mimeType)}`;
+            // The downloaded file always carries a .mp4 extension regardless of
+            // the stored container — the underlying bytes are not transcoded,
+            // only the on-disk filename is normalized to .mp4.
+            const filename = `${slugify(rec.title)}.mp4`;
             headers.set("Content-Disposition", `attachment; filename="${filename}"`);
             headers.set("Cache-Control", "private, max-age=300");
             const len = objRes.headers.get("content-length");

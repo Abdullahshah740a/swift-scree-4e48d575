@@ -40,7 +40,7 @@ function ViewerPage() {
     setDownloading(true);
     try {
       await triggerVideoDownload(data);
-      toast.success(`Downloading ${data.ext || "webm"}…`);
+      toast.success("Downloading mp4…");
     } catch {
       toast.error("Could not start download");
     } finally {
@@ -80,7 +80,7 @@ function ViewerPage() {
               onClick={handleDownload}
               disabled={downloading}
               className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-60"
-              title={`Download .${data.ext || "webm"}`}
+              title="Download .mp4"
             >
               <Download className="size-3.5" /> {downloading ? "Downloading…" : "Download"}
             </button>

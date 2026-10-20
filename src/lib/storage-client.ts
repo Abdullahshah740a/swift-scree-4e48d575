@@ -239,8 +239,10 @@ export function slugify(title: string | undefined): string {
  *      (no signed-URL expiry edge cases).
  */
 export async function triggerVideoDownload(rec: VideoRecord): Promise<void> {
-  const ext = rec.ext || extForMime(rec.mimeType);
-  const filename = `${slugify(rec.title)}.${ext}`;
+  // The downloaded file always carries a .mp4 extension regardless of the
+  // stored container — the underlying bytes are not transcoded, only the
+  // on-disk filename is normalized to .mp4.
+  const filename = `${slugify(rec.title)}.mp4`;
 
   // 1) Local blob first (same-origin → download attribute honored).
   try {
