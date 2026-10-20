@@ -20,6 +20,10 @@ function extForMime(mime: string): string {
   return mime && mime.toLowerCase().includes("mp4") ? "mp4" : "webm";
 }
 
+function mimeForExt(ext?: string): string {
+  return ext && ext.toLowerCase() === "mp4" ? "video/mp4" : "video/webm";
+}
+
 function slugify(title: string): string {
   return (
     (title || "swift-screen")
@@ -106,7 +110,8 @@ export const Route = createFileRoute("/api/video/$id")({
               return new Response("Video missing", { status: 502 });
             }
             const headers = new Headers();
-            headers.set("Content-Type", rec.mimeType || extForMime(rec.mimeType));
+            const mime = rec.mimeType || mimeForExt(rec.ext);
+            headers.set("Content-Type", mime);
             const filename = `${slugify(rec.title)}.${rec.ext || extForMime(rec.mimeType)}`;
             headers.set("Content-Disposition", `attachment; filename="${filename}"`);
             headers.set("Cache-Control", "private, max-age=300");
