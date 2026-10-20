@@ -13,6 +13,7 @@ import {
 import { extFromMime } from "@/lib/format";
 import { persistVideoMeta } from "@/lib/storage-client";
 import { finalizeAndSaveRecording } from "@/lib/recording-save";
+import { repairWebmDuration } from "@/lib/webm-duration";
 import { toast } from "sonner";
 import type { SourceType, VideoRecord } from "@/lib/types";
 
@@ -144,8 +145,17 @@ export function useRecordingEngine(qc: QueryClient): RecordingEngine {
   // SINGLE authoritative finalize path, called only from onstop. The safety
   // net never builds a blob — it only calls rec.stop() so onstop fires. onerror
   // never finalizes — it records the error and lets onstop complete. Idempotent.
+  //
+  // IMPORTANT (Chrome compatibility): Chrome's MediaRecorder emits a "live"
+  // WebM whose EBML Duration element is left unset. Firefox tolerates that;
+  // Chrome does not — Chrome reports a decode error and never fires
+  // loadedmetadata, which is exactly the "plays in Firefox, not Chrome"
+  // regression. We repair the container (pure-JS EBML patch, no transcode)
+  // with the real recorded duration BEFORE validating / previewing / saving,
+  // so the local blob, the cloud upload, AND the immediate preview all carry
+  // Chrome-compatible bytes.
   const finalizeFromChunks = useCallback(
-    (_reason: "onstop") => {
+    async (_reason: "onstop") => {
       if (finalizeStartedRef.current) return;
       finalizeStartedRef.current = true;
       if (safetyTimerRef.current) {
@@ -162,11 +172,23 @@ export function useRecordingEngine(qc: QueryClient): RecordingEngine {
       chosenMimeRef.current = actualMime;
       setChosenMime(actualMime);
       const chunkCount = chunksRef.current.length;
-      const finalBlob = new Blob(chunksRef.current, { type: actualMime });
+      const rawBlob = new Blob(chunksRef.current, { type: actualMime });
+
+      // Repair the WebM container for Chrome before validation/preview/save.
+      // Non-WebM (e.g. Safari mp4) is returned untouched.
+      let finalBlob = rawBlob;
+      try {
+        finalBlob = await repairWebmDuration(rawBlob, total * 1000, actualMime);
+      } catch (e) {
+        console.warn("[record] webm duration repair threw; using original", e);
+        finalBlob = rawBlob;
+      }
+
       console.info("[record] finalize", {
         mime: actualMime,
         chunkCount,
         blobSize: finalBlob.size,
+        repaired: finalBlob !== rawBlob,
         hadError: Boolean(recorderErrorRef.current),
       });
       const validation = validateRecordingBlob(finalBlob, actualMime, chunkCount);
