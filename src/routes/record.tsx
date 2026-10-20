@@ -56,7 +56,7 @@ function RecordPage() {
   async function handleUpdateDetails() {
     await engine.updateDetails({ title, description: desc, source, author });
     setJustUpdated(true);
-    window.setTimeout(() => setJustUpdated(false), 1000);
+    window.setTimeout(() => setJustUpdated(false), 2000);
   }
   function handleNewOrReset() {
     if (phase === "stopped" && engine.savedId) {
