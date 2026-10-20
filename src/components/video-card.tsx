@@ -9,6 +9,7 @@ import {
   FolderInput,
   Eye,
   Clock,
+  Loader2,
 } from "lucide-react";
 import type { Folder, VideoRecord } from "@/lib/types";
 import { formatDuration, formatRelativeTime, sourceTypeLabel } from "@/lib/format";
@@ -21,20 +22,28 @@ export function VideoCard({
   onDelete,
   onMove,
   compact,
+  moving,
 }: {
   video: VideoRecord;
   folders: Folder[];
   onDelete?: ((video: VideoRecord) => void) | undefined;
   onMove?: ((video: VideoRecord, folderId: string | null) => void) | undefined;
   compact?: boolean;
+  moving?: boolean | undefined;
 }) {
   return (
     <div
       className={cn(
         "group relative rounded-xl border border-border/60 bg-card/70 transition-colors hover:border-primary/40",
         compact ? "flex items-center gap-3 pr-2" : "overflow-hidden",
+        moving && "pointer-events-none opacity-70",
       )}
     >
+      {moving ? (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/40 backdrop-blur-[1px]">
+          <Loader2 className="size-5 animate-spin text-primary" />
+        </div>
+      ) : null}
       <Link
         to="/watch/$id"
         params={{ id: video.id }}
@@ -89,7 +98,13 @@ export function VideoCard({
               </p>
             </Link>
             {onDelete || onMove ? (
-              <CardMenu video={video} folders={folders} onDelete={onDelete} onMove={onMove} />
+              <CardMenu
+                video={video}
+                folders={folders}
+                onDelete={onDelete}
+                onMove={onMove}
+                moving={moving}
+              />
             ) : null}
           </div>
           <div className="mt-2 flex items-center gap-3 text-[11px] text-muted-foreground">
@@ -104,7 +119,14 @@ export function VideoCard({
       )}
 
       {(onDelete || onMove) && compact ? (
-        <CardMenu video={video} folders={folders} onDelete={onDelete} onMove={onMove} compact />
+        <CardMenu
+          video={video}
+          folders={folders}
+          onDelete={onDelete}
+          onMove={onMove}
+          compact
+          moving={moving}
+        />
       ) : null}
     </div>
   );
@@ -125,12 +147,14 @@ function CardMenu({
   onDelete,
   onMove,
   compact,
+  moving,
 }: {
   video: VideoRecord;
   folders: Folder[];
   onDelete?: ((video: VideoRecord) => void) | undefined;
   onMove?: ((video: VideoRecord, folderId: string | null) => void) | undefined;
   compact?: boolean;
+  moving?: boolean | undefined;
 }) {
   return (
     <div className="relative shrink-0">
@@ -140,9 +164,14 @@ function CardMenu({
             type="button"
             className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
             aria-label="More actions"
+            disabled={moving}
             onClick={(e) => e.stopPropagation()}
           >
-            <MoreVertical className="size-4" />
+            {moving ? (
+              <Loader2 className="size-4 animate-spin text-primary" />
+            ) : (
+              <MoreVertical className="size-4" />
+            )}
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent

@@ -3,7 +3,13 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Folder as FolderIcon, Film, Trash2, Circle } from "lucide-react";
 import { useState } from "react";
 import { VideoCard } from "@/components/video-card";
-import { fetchFolders, fetchVideos, persistFolders, removeRecording } from "@/lib/storage-client";
+import {
+  fetchFolders,
+  fetchVideos,
+  persistFolders,
+  persistVideoMeta,
+  removeRecording,
+} from "@/lib/storage-client";
 import type { Folder, VideoRecord } from "@/lib/types";
 import { toast } from "sonner";
 
@@ -30,6 +36,7 @@ export const Route = createFileRoute("/library")({
 function Library() {
   const qc = useQueryClient();
   const [activeFolder, setActiveFolder] = useState<string | "all">("all");
+  const [movingId, setMovingId] = useState<string | null>(null);
 
   const folders = useQuery({ queryKey: ["folders"], queryFn: fetchFolders });
   const videos = useQuery({ queryKey: ["videos"], queryFn: fetchVideos });
@@ -67,15 +74,33 @@ function Library() {
 
   const moveMut = useMutation({
     mutationFn: async ({ video, folderId }: { video: VideoRecord; folderId: string | null }) => {
-      // Folders are server-persisted via the meta JSON; moving updates the
-      // record's folderId. We can't write individual meta through the facade,
-      // so persist via saveVideoMeta through the local path + cloud best-effort.
-      const { saveVideoMeta } = await import("@/lib/storage.functions");
-      await saveVideoMeta({ data: { record: { ...video, folderId } } });
+      const updated = { ...video, folderId };
+      // Persist both locally (instant cache) and to cloud (best-effort).
+      await persistVideoMeta(updated);
+    },
+    onMutate: async ({ video, folderId }) => {
+      setMovingId(video.id);
+      // Optimistically update the cache so the card moves instantly.
+      await qc.cancelQueries({ queryKey: ["videos"] });
+      const prev = qc.getQueryData<VideoRecord[]>(["videos"]);
+      if (prev) {
+        qc.setQueryData<VideoRecord[]>(
+          ["videos"],
+          prev.map((v) => (v.id === video.id ? { ...v, folderId } : v)),
+        );
+      }
+      return { prev };
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["videos"] });
       toast.success("Moved to folder");
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.prev) qc.setQueryData(["videos"], ctx.prev);
+      toast.error("Could not move video — try again");
+    },
+    onSettled: () => {
+      setMovingId(null);
+      qc.invalidateQueries({ queryKey: ["videos"] });
     },
   });
 
@@ -182,6 +207,7 @@ function Library() {
                   key={v.id}
                   video={v}
                   folders={allFolders}
+                  moving={movingId === v.id}
                   onDelete={(vid) => deleteVideoMut.mutate(vid)}
                   onMove={(vid, fid) => moveMut.mutate({ video: vid, folderId: fid })}
                 />
