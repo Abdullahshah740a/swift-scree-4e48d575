@@ -59,15 +59,6 @@ export async function persistFolders(folders: Folder[]): Promise<void> {
   await safeCall(saveFoldersFn({ data: { folders } }), undefined);
 }
 
-/**
- * Persist folders and surface errors (no swallow) with a transport timeout,
- * so a mutation can roll back its optimistic state on a real failure instead
- * of silently succeeding while the write never lands.
- */
-export async function saveFoldersStrict(folders: Folder[]): Promise<void> {
-  await withTimeout(saveFoldersFn({ data: { folders } }), 12000);
-}
-
 export async function fetchComments(videoId: string): Promise<Comment[]> {
   return safeCall(listCommentsFn({ data: { videoId } }), []);
 }
