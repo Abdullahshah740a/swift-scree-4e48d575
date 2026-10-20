@@ -1,5 +1,6 @@
 import {
   createFolder as createFolderFn,
+  createUploadUrl as createUploadUrlFn,
   deleteFolder as deleteFolderFn,
   deleteVideo as deleteVideoFn,
   getStorageStatus as getStorageStatusFn,
@@ -15,7 +16,6 @@ import {
   saveReactions as saveReactionsFn,
   saveTranscript as saveTranscriptFn,
   saveVideoMeta as saveVideoMetaFn,
-  uploadVideo as uploadVideoFn,
 } from "./storage.functions";
 import {
   deleteBlob,
@@ -95,11 +95,66 @@ export async function persistTranscript(transcript: Transcript): Promise<void> {
   await safeCall(saveTranscriptFn({ data: { transcript } }), undefined);
 }
 
-/** Save a completed recording: upload blob + meta, and cache locally. */
+/**
+ * Upload a recording blob DIRECTLY to Cloud Storage using a signed upload URL
+ * the server generates. The large video bytes never pass through the Edge
+ * worker — base64-over-RPC hits the worker's payload limit for any real
+ * recording and times out, which is why every save showed "Cloud not
+ * reachable" / local-only. Returns true only when the object was actually
+ * uploaded.
+ */
+async function uploadBlobDirect(
+  id: string,
+  ext: string,
+  blob: Blob,
+  mime: string,
+): Promise<boolean> {
+  const sign = await withTimeout(createUploadUrlFn({ data: { id, ext } }), 12000);
+  if (!sign.ok || !sign.url) {
+    console.warn("[upload] no signed URL:", sign.error);
+    return false;
+  }
+  // PUT the raw bytes straight to Cloud Storage. No apikey/Authorization
+  // header — the signed URL already carries the authorization token and
+  // Supabase rejects a request that also sends a service-role header on a
+  // signed upload. upsert=true so a retry of the same id replaces cleanly.
+  const uploadUrl = sign.url + (sign.url.includes("?") ? "&upsert=true" : "?upsert=true");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(uploadUrl, {
+      method: "PUT",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": mime || "application/octet-stream",
+        "x-upsert": "true",
+      },
+      body: blob,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.warn("[upload] PUT failed:", res.status, text);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn("[upload] PUT threw:", e instanceof Error ? e.message : e);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Save a completed recording: upload blob + meta, and cache locally. Uploads
+ * the blob directly to Cloud Storage via a signed URL (not base64-over-RPC,
+ * which hit the Edge payload limit for real recordings). Only marks the
+ * recording as shareable when the upload actually succeeded.
+ */
 export async function saveRecording(
   record: VideoRecord,
   blob: Blob,
-): Promise<{ ok: boolean; localOnly: boolean }> {
+): Promise<{ ok: boolean; localOnly: boolean; message: string | undefined }> {
   // Always cache locally first so it works offline / without a backend.
   try {
     await putBlob(record.id, blob);
@@ -108,15 +163,52 @@ export async function saveRecording(
     /* local cache best-effort */
   }
 
-  try {
-    const base64 = await blobToBase64(blob);
-    await withTimeout(uploadVideoFn({ data: { record, base64 } }), 25000);
-    return { ok: true, localOnly: false };
-  } catch {
-    // Cloud failed; the local copy still exists. Try to persist just the meta.
-    void safeCall(saveVideoMetaFn({ data: { record } }), undefined);
-    return { ok: true, localOnly: true };
+  const uploaded = await uploadBlobDirect(record.id, record.ext, blob, record.mimeType);
+  if (uploaded) {
+    // Meta is what makes the recording appear in the shared library. Only
+    // persist it once the video object exists, so a missing upload is never
+    // reported as an available recording on other devices.
+    const meta = await safeCall(saveVideoMetaFn({ data: { record } }), { ok: true });
+    if (!meta?.ok) {
+      return {
+        ok: true,
+        localOnly: true,
+        message: "Uploaded video, but could not save metadata. Retrying soon.",
+      };
+    }
+    return { ok: true, localOnly: false, message: undefined };
   }
+  return {
+    ok: true,
+    localOnly: true,
+    message: "Cloud upload failed — saved locally only.",
+  };
+}
+
+/**
+ * Re-upload a local-only recording's bytes to Cloud so it becomes shareable.
+ * Used by the watch page's "Sync to Cloud" retry when the original upload
+ * failed. Only available on a device that still has the IndexedDB blob.
+ */
+export async function retryUpload(
+  rec: VideoRecord,
+  blob: Blob,
+): Promise<{ ok: boolean; localOnly: boolean; message: string | undefined }> {
+  const uploaded = await uploadBlobDirect(rec.id, rec.ext, blob, rec.mimeType);
+  if (uploaded) {
+    await safeCall(saveVideoMetaFn({ data: { record: rec } }), { ok: true });
+    try {
+      await putVideoMeta(rec);
+    } catch {
+      /* best-effort */
+    }
+    return { ok: true, localOnly: false, message: undefined };
+  }
+  return {
+    ok: false,
+    localOnly: true,
+    message: "Cloud upload failed. Try again later.",
+  };
 }
 
 /** Update a recording's metadata (e.g. edited title/description). */
@@ -192,15 +284,6 @@ export async function moveVideoStrict(
     }
   }
   return res;
-}
-
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
 }
 
 /**

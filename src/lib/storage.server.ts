@@ -193,6 +193,43 @@ async function removeObject(path: string): Promise<void> {
 
 /* ---- Videos ---- */
 
+/**
+ * Create a short-lived signed upload URL for a video object. The browser
+ * uploads the blob DIRECTLY to Cloud Storage via this URL — the large binary
+ * never passes through the Edge worker (base64-over-RPC hits the worker's
+ * payload limit for any real recording and times out, which is why every
+ * save showed "Cloud not reachable" / local-only). The server authorizes the
+ * upload with the service role key; the browser just PUTs bytes.
+ */
+export async function createUploadUrl(
+  id: string,
+  ext: string,
+): Promise<{ ok: boolean; url?: string; error?: string }> {
+  if (!configured()) return { ok: false, error: NOT_CONFIGURED_MSG };
+  const { url, bucket } = env();
+  const objectPath = `videos/${id}.${ext}`;
+  try {
+    const res = await sbFetch(
+      `/storage/v1/object/upload/sign/${encodeBucket(bucket)}/${encodeURIComponent(objectPath)}`,
+      { method: "POST", headers: { "Content-Type": "application/json" } },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, error: `sign failed: ${res.status} ${text}` };
+    }
+    const data = (await res.json()) as { signed_url?: string; url?: string };
+    const signed = data.signed_url ?? data.url;
+    if (!signed) return { ok: false, error: "No signed URL in response." };
+    // signed_url may be relative ("/storage/v1/...") or absolute.
+    const full = signed.startsWith("http")
+      ? signed
+      : `${url}${signed.startsWith("/") ? "" : "/"}${signed}`;
+    return { ok: true, url: full };
+  } catch (e) {
+    return { ok: false, error: errMsg(e) };
+  }
+}
+
 export async function listVideos(): Promise<VideoRecord[]> {
   if (!configured()) return [];
   try {
