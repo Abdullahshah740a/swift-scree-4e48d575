@@ -15,6 +15,13 @@ export interface VideoRecord {
   views: number;
   createdAt: number;
   storagePath?: string; // videos/<id>.<ext>
+  /**
+   * True ONLY after the video bytes were uploaded to Cloud AND verified to be
+   * present. A local-only recording (upload failed) has `uploaded: false` and
+   * must never be advertised as shareable — a different browser/device has no
+   * copy of it and would otherwise see a "decode" error for a missing file.
+   */
+  uploaded?: boolean;
 }
 
 export interface Folder {

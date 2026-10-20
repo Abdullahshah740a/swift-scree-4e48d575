@@ -40,13 +40,12 @@ export const saveVideoMeta = createServerFn({ method: "POST" })
 
 export const uploadVideo = createServerFn({ method: "POST" })
   .validator((data) => z.object({ record: z.any(), base64: z.string() }).parse(data))
-  .handler(async ({ data }) => {
-    await uploadVideoServer({
+  .handler(async ({ data }) =>
+    uploadVideoServer({
       record: data.record as VideoRecord,
       base64: data.base64,
-    });
-    return { ok: true };
-  });
+    }),
+  );
 
 export const deleteVideo = createServerFn({ method: "POST" })
   .validator((data) => z.object({ id: z.string(), ext: z.string() }).parse(data))
