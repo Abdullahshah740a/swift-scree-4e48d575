@@ -220,10 +220,26 @@ function RecordPage() {
           </div>
 
           {engine.saveMsg ? (
-            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-success/40 bg-success/10 px-4 py-3 text-sm text-foreground">
-              <Check className="size-4 text-success" />
+            <div
+              role="status"
+              aria-live="polite"
+              className={
+                engine.savedLocalOnly
+                  ? "flex flex-wrap items-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground"
+                  : "flex flex-wrap items-center gap-2 rounded-lg border border-success/40 bg-success/10 px-4 py-3 text-sm text-foreground"
+              }
+            >
+              {engine.savedLocalOnly ? (
+                <AlertTriangle className="size-4 text-warning" />
+              ) : (
+                <Check className="size-4 text-success" />
+              )}
               <span>{engine.saveMsg}</span>
-              {engine.savedId ? (
+              {engine.savedLocalOnly && engine.savedId ? (
+                <span className="ml-auto text-xs text-muted-foreground">
+                  Open the watch page to retry the upload.
+                </span>
+              ) : engine.savedId ? (
                 <button
                   onClick={() => {
                     qc.invalidateQueries({ queryKey: ["videos"] });

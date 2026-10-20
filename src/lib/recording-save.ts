@@ -11,9 +11,9 @@ export interface FinalizeContext {
 
 export interface FinalizeResult {
   ok: boolean;
-  reason?: string | undefined;
-  record?: VideoRecord | undefined;
-  localOnly?: boolean | undefined;
+  reason?: string;
+  record?: VideoRecord;
+  localOnly?: boolean;
   message?: string | undefined;
 }
 
@@ -80,12 +80,17 @@ export async function finalizeAndSaveRecording(
     if (result.message !== undefined) out.message = result.message;
     return out;
   } catch (e) {
-    console.error("[record] save failed", e);
+    // Preserve the real error so the user sees the actual cause instead of a
+    // generic "Cloud upload failed". The recording is still cached locally
+    // (saveRecording caches before uploading), so this is local-only — but
+    // the message must reflect the real failure, not a swallowed one.
+    const msg = e instanceof Error ? e.message : "Cloud upload failed.";
+    console.error("[record] save failed", msg);
     return {
       ok: true,
       record,
       localOnly: true,
-      message: "Cloud upload failed — saved locally only.",
+      message: `${msg} Saved locally only — use “Sync to Cloud” to retry.`,
     };
   }
 }

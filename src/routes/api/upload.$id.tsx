@@ -58,14 +58,19 @@ export const Route = createFileRoute("/api/upload/$id")({
         if (!parsed.success) return new Response("Invalid id", { status: 400 });
 
         const ext = String(expectedExt).toLowerCase().endsWith("mp4") ? "mp4" : "webm";
+        // `videos/<id>.<ext>` — the `/` MUST stay a literal path separator.
+        // encodeURIComponent("videos/<id>.<ext>") encodes the `/` to %2F, and
+        // the Storage object endpoint signs/stores `videos%2F<id>.<ext>` as a
+        // single flat segment — the object ends up at the wrong path and the
+        // later signed playback URL 404s. Encode each segment separately and
+        // join with a literal `/` (same fix as the playback route).
         const objectPath = `videos/${parsed.data}.${ext}`;
+        const objectSegments = objectPath.split("/").map(encodeURIComponent).join("/");
 
         // Forward the raw body to Cloud Storage with upsert so a retry of the
         // same id replaces cleanly. The body is a ReadableStream — pipe it
         // through without buffering the whole file into memory.
-        const uploadUrl = `${url}/storage/v1/object/${encodeBucket(bucket)}/${encodeURIComponent(
-          objectPath,
-        )}`;
+        const uploadUrl = `${url}/storage/v1/object/${encodeBucket(bucket)}/${objectSegments}`;
 
         try {
           const uploadRes = await fetch(uploadUrl, {
@@ -85,19 +90,26 @@ export const Route = createFileRoute("/api/upload/$id")({
           if (!uploadRes.ok) {
             const text = await uploadRes.text().catch(() => "");
             console.warn("[upload-proxy] object POST failed:", uploadRes.status, text);
-            return new Response(`Upload failed (${uploadRes.status})`, { status: 502 });
+            // Surface the real storage error (status + sanitized body) so the
+            // client can report an actionable message instead of a generic
+            // "Cloud not reachable". Never echo the key or auth headers.
+            return new Response(
+              JSON.stringify({
+                ok: false,
+                error: `storage ${uploadRes.status}`,
+                message: text.slice(0, 300) || uploadRes.statusText,
+              }),
+              { status: 502, headers: { "Content-Type": "application/json" } },
+            );
           }
         } catch (e) {
           console.warn("[upload-proxy] object POST threw:", e instanceof Error ? e.message : e);
-          return new Response("Upload failed (transport)", { status: 502 });
+          return new Response(
+            JSON.stringify({ ok: false, error: "transport", message: "Upload transport error" }),
+            { status: 502, headers: { "Content-Type": "application/json" } },
+          );
         }
 
-        // Persist the metadata JSON. The client passes it as a query/header so
-        // the body stays as the raw video bytes. Only the client knows the
-        // full record; the server reconstructs it from headers + the uploaded
-        // object. To keep this robust without serializing the whole record in
-        // a header, the client also calls saveVideoMeta via the server-fn —
-        // but we return the object path so the client can build the record.
         return new Response(JSON.stringify({ ok: true, storagePath: objectPath, ext }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
