@@ -1,26 +1,23 @@
 import { useState } from "react";
 import { Link as LinkIcon, Code2, Download, Check, Clipboard, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { triggerVideoDownload } from "@/lib/storage-client";
+import type { VideoRecord } from "@/lib/types";
 
 export function ShareBar({
-  videoId,
-  title,
-  mimeType,
-  ext,
+  video,
   onDelete,
 }: {
-  videoId: string;
-  title: string;
-  mimeType: string;
-  ext: string;
+  video: VideoRecord;
   onDelete?: (() => void) | undefined;
 }) {
   const [copied, setCopied] = useState<"link" | "embed" | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
   const shareUrl =
-    typeof window !== "undefined" ? `${window.location.origin}/v/${videoId}` : `/v/${videoId}`;
+    typeof window !== "undefined" ? `${window.location.origin}/v/${video.id}` : `/v/${video.id}`;
   const embedSrc = shareUrl;
-  const embedCode = `<iframe src="${embedSrc}" width="640" height="360" frameborder="0" allow="autoplay; fullscreen" title="${title.replace(/"/g, "&quot;")}"></iframe>`;
+  const embedCode = `<iframe src="${embedSrc}" width="640" height="360" frameborder="0" allow="autoplay; fullscreen" title="${video.title.replace(/"/g, "&quot;")}"></iframe>`;
 
   const copy = async (which: "link" | "embed", text: string) => {
     try {
@@ -30,6 +27,19 @@ export function ShareBar({
       setTimeout(() => setCopied(null), 1800);
     } catch {
       toast.error("Could not copy");
+    }
+  };
+
+  const handleDownload = async () => {
+    setDownloading(true);
+    try {
+      await triggerVideoDownload(video);
+      toast.success(`Downloading ${video.ext || "webm"}…`);
+    } catch (e) {
+      toast.error("Could not start download");
+      console.error("[share-bar] download failed", e);
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -49,14 +59,15 @@ export function ShareBar({
         {copied === "embed" ? <Check className="size-4" /> : <Code2 className="size-4" />}
         Copy embed
       </button>
-      <a
-        href={`/api/video/${videoId}`}
-        download={`${title.replace(/[^a-z0-9-_]+/gi, "-").toLowerCase() || "swift-screen"}.${ext}`}
-        className="inline-flex items-center gap-2 rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-accent"
-        title={`Download .${ext}`}
+      <button
+        type="button"
+        onClick={handleDownload}
+        disabled={downloading}
+        className="inline-flex items-center gap-2 rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-60"
+        title={`Download .${video.ext || "webm"}`}
       >
-        <Download className="size-4" /> Download
-      </a>
+        <Download className="size-4" /> {downloading ? "Downloading…" : "Download"}
+      </button>
       {onDelete ? (
         <button
           type="button"
@@ -68,7 +79,7 @@ export function ShareBar({
         </button>
       ) : null}
       <span className="ml-auto hidden items-center gap-1 text-xs text-muted-foreground sm:inline-flex">
-        <Clipboard className="size-3.5" /> {mimeType}
+        <Clipboard className="size-3.5" /> {video.mimeType}
       </span>
     </div>
   );

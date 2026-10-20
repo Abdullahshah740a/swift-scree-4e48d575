@@ -202,3 +202,72 @@ function blobToBase64(blob: Blob): Promise<string> {
     reader.readAsDataURL(blob);
   });
 }
+
+/**
+ * Derive the correct on-disk extension for a recording from its actual MIME
+ * type — never from a renamed one. Renaming .webm → .mp4 does NOT transcode:
+ * it produces an .mp4-named WebM that local media players (QuickTime, Windows
+ * Media) reject. The recorder records WebM (VP9/VP8 + Opus) on Chrome/Firefox,
+ * so the honest extension is .webm; only genuine MP4 containers get .mp4.
+ */
+export function extForMime(mime: string | undefined): string {
+  const m = (mime ?? "").toLowerCase();
+  if (m.includes("mp4") || m === "video/mp4") return "mp4";
+  return "webm";
+}
+
+export function slugify(title: string | undefined): string {
+  const s = (title ?? "swift-screen").replace(/[^a-z0-9-_]+/gi, "-").toLowerCase();
+  return s.replace(/^-+|-+$/g, "").slice(0, 80) || "swift-screen";
+}
+
+/**
+ * Trigger a real file download for a recording.
+ *
+ * Browsers IGNORE the <a download> attribute when the href cross-redirects
+ * to a cross-origin URL — which is exactly what the playback 302 (→ Supabase
+ * CDN) does, so the old <a href="/api/video/$id" download> button navigated/
+ * played instead of saving. This instead:
+ *   1. Prefers the local IndexedDB blob when present → a same-origin blob:
+ *      URL, where the download attribute IS honored, and the file saves with
+ *      the correct .webm/.mp4 extension. This is also the ONLY copy that
+ *      exists for local-only recordings whose cloud blob upload fell over.
+ *   2. Falls back to a same-origin stream from /api/video/$id?download=1,
+ *      which the worker serves with Content-Disposition: attachment. A
+ *      same-origin attachment response forces a real save regardless of
+ *      container, and the server reads the bytes with the service-role key
+ *      (no signed-URL expiry edge cases).
+ */
+export async function triggerVideoDownload(rec: VideoRecord): Promise<void> {
+  const ext = rec.ext || extForMime(rec.mimeType);
+  const filename = `${slugify(rec.title)}.${ext}`;
+
+  // 1) Local blob first (same-origin → download attribute honored).
+  try {
+    const blob = await getBlob(rec.id);
+    if (blob && blob.size > 0) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Revoke after the download has started.
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      return;
+    }
+  } catch {
+    /* fall through to cloud */
+  }
+
+  // 2) Same-origin attachment stream from the worker.
+  const a = document.createElement("a");
+  a.href = `/api/video/${rec.id}?download=1`;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}

@@ -244,13 +244,7 @@ export function WatchContent({
               <p className="mt-3 text-sm text-muted-foreground">{rec.description}</p>
             ) : null}
           </div>
-          <ShareBar
-            videoId={rec.id}
-            title={rec.title}
-            mimeType={rec.mimeType}
-            ext={rec.ext}
-            onDelete={chromeless ? undefined : handleDelete}
-          />
+          <ShareBar video={rec} onDelete={chromeless ? undefined : handleDelete} />
 
           {showTabs ? (
             <div className="mt-2 grid gap-4 lg:grid-cols-2">

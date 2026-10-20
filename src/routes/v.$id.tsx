@@ -2,8 +2,10 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Download, Clapperboard } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { WatchContent } from "@/components/watch-content";
-import { fetchVideoMeta } from "@/lib/storage-client";
+import { fetchVideoMeta, triggerVideoDownload } from "@/lib/storage-client";
 import { Loader2 } from "lucide-react";
+import { toast } from "sonner";
+import { useState } from "react";
 
 export const Route = createFileRoute("/v/$id")({
   head: ({ params }) => ({
@@ -31,6 +33,20 @@ function ViewerPage() {
     queryKey: ["video", id],
     queryFn: () => fetchVideoMeta(id),
   });
+  const [downloading, setDownloading] = useState(false);
+
+  const handleDownload = async () => {
+    if (!data) return;
+    setDownloading(true);
+    try {
+      await triggerVideoDownload(data);
+      toast.success(`Downloading ${data.ext || "webm"}…`);
+    } catch {
+      toast.error("Could not start download");
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   if (isLoading) {
     return (
@@ -59,13 +75,15 @@ function ViewerPage() {
           <Clapperboard className="size-4 text-primary" />
           <span className="font-semibold text-foreground">Swift Screen</span>
           <span className="ml-auto">
-            <a
-              href={`/api/video/${id}`}
-              download={`${data.title.replace(/[^a-z0-9-_]+/gi, "-").toLowerCase() || "swift-screen"}.${data.ext}`}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+            <button
+              type="button"
+              onClick={handleDownload}
+              disabled={downloading}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-60"
+              title={`Download .${data.ext || "webm"}`}
             >
-              <Download className="size-3.5" /> Download
-            </a>
+              <Download className="size-3.5" /> {downloading ? "Downloading…" : "Download"}
+            </button>
           </span>
         </div>
         <WatchContent videoId={id} chromeless authorName="Viewer" />
