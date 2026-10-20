@@ -255,7 +255,12 @@ export async function getVideoMeta(id: string): Promise<VideoRecord | null> {
 }
 
 export async function saveVideoMeta(rec: VideoRecord): Promise<void> {
-  if (!configured()) return;
+  // Do NOT silently return when unconfigured — the server-fn wrapper would
+  // then return { ok: true } and the client would report "Saved to Cloud"
+  // for a recording whose metadata was never written (a real false-success
+  // bug). Throw so the caller's withTimeout/try-catch downgrades to localOnly
+  // with the actual reason.
+  if (!configured()) throw new Error(NOT_CONFIGURED_MSG);
   await uploadJson(`meta/${rec.id}.json`, rec);
 }
 
