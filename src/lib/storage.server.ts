@@ -6,6 +6,7 @@ import type {
   Reaction,
   StorageStatus,
   Transcript,
+  VideoObjectCheck,
   VideoRecord,
 } from "./types";
 
@@ -288,41 +289,58 @@ export async function deleteVideo(id: string, ext: string): Promise<void> {
 }
 
 /**
- * Check whether a recording's video binary actually exists in Cloud Storage,
- * independent of its metadata. Returns { exists, size } so the client can
- * detect a pre-`localOnly` recording whose metadata was saved but whose
- * binary upload failed (the old base64-over-RPC timeout path) and offer a
- * recovery/retry from the local IndexedDB blob. `size` is the object's
- * content-length when available.
+ * Verify a recording's video binary in Cloud Storage, independent of its
+ * metadata. Returns an explicit present/missing/unknown status so the
+ * client never has to guess:
+ *   - "present":  storage returned a HEAD 2xx for the object path.
+ *   - "missing":  storage returned 404 (object not found) — the ONLY status
+ *                the storage API uses to prove the object is absent. Other
+ *                4xx (400, 403, …) are auth/path errors, NOT missing-object
+ *                proof, so they map to "unknown" with the status preserved
+ *                in `error`.
+ *   - "unknown":  any other non-ok response, OR a network/transport failure.
+ *                The recording stays visible (it may still exist) but is NOT
+ *                claimed as verified in cloud storage; the check may be
+ *                retried by the caller.
+ * `size` is the object's content-length when available — used for a
+ * best-effort byte-size comparison against the source Blob. `error`
+ * preserves diagnostic detail for non-present cases (never a secret).
  */
-export async function checkVideoObject(
-  id: string,
-  ext: string,
-): Promise<{ exists: boolean; size: number | null; configured: boolean }> {
-  if (!configured()) return { exists: false, size: null, configured: false };
-  const { url, bucket } = env();
+export async function checkVideoObject(id: string, ext: string): Promise<VideoObjectCheck> {
+  if (!configured()) {
+    return { status: "unknown", size: null, configured: false, error: NOT_CONFIGURED_MSG };
+  }
+  const { bucket } = env();
   const objectPath = `videos/${id}.${ext}`;
   try {
     const res = await sbFetch(
       `/storage/v1/object/${encodeBucket(bucket)}/${encodeURIComponent(objectPath)}`,
       { method: "HEAD" },
     );
-    if (res.status === 404 || res.status === 400) {
-      return { exists: false, size: null, configured: true };
+    if (res.status === 404) {
+      return { status: "missing", size: 0, configured: true };
     }
     if (!res.ok) {
-      // Treat other errors as "unknown" — don't claim missing.
-      return { exists: true, size: null, configured: true };
+      return {
+        status: "unknown",
+        size: null,
+        configured: true,
+        error: `storage responded ${res.status}`,
+      };
     }
     const len = res.headers.get("content-length");
     return {
-      exists: true,
+      status: "present",
       size: len ? Number(len) : null,
       configured: true,
     };
-  } catch {
-    // Network failure — don't claim missing; let playback attempt proceed.
-    return { exists: true, size: null, configured: true };
+  } catch (e) {
+    return {
+      status: "unknown",
+      size: null,
+      configured: true,
+      error: errMsg(e),
+    };
   }
 }
 

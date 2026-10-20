@@ -34,6 +34,7 @@ import type {
   Reaction,
   StorageStatus,
   Transcript,
+  VideoObjectCheck,
   VideoRecord,
 } from "./types";
 import { safeCall, withTimeout } from "./with-timeout";
@@ -80,12 +81,14 @@ export async function fetchVideoMeta(id: string): Promise<VideoRecord | null> {
  * errors are treated as "exists" so a transient failure never wrongly hides
  * a recording.
  */
-export async function fetchVideoObjectStatus(
-  id: string,
-  ext: string,
-): Promise<{ exists: boolean; size: number | null; configured: boolean }> {
+export async function fetchVideoObjectStatus(id: string, ext: string): Promise<VideoObjectCheck> {
+  // The server returns an explicit present/missing/unknown status and never
+  // throws for its own network errors (it catches them -> "unknown").
+  // safeCall only guards a transport failure in the RPC itself, defaulting to
+  // "unknown" so a recording is never wrongly claimed verified in cloud
+  // storage — but it also stays visible (unknown is not missing).
   return safeCall(checkVideoObjectFn({ data: { id, ext } }), {
-    exists: true,
+    status: "unknown",
     size: null,
     configured: true,
   });
@@ -178,7 +181,7 @@ async function uploadBlobViaProxy(
 export async function saveRecording(
   record: VideoRecord,
   blob: Blob,
-): Promise<{ ok: boolean; localOnly: boolean; message: string | undefined }> {
+): Promise<{ ok: boolean; localOnly: boolean; message: string | undefined; verified?: boolean }> {
   // Always cache locally first so it works offline / without a backend, and
   // so a failed cloud upload can be retried later from this device.
   let localSaved = false;
@@ -211,7 +214,29 @@ export async function saveRecording(
     } catch {
       /* best-effort */
     }
-    return { ok: true, localOnly: false, message: undefined };
+    // Best-effort byte-size verification: HEAD the stored object and compare
+    // its content-length to the source Blob size. A proxy 200 only proves the
+    // upload handler ran; a matching HEAD size is the closest available proof
+    // the stored bytes match the source. Never blocks the save — a
+    // missing/unknown check logs and falls back to "uploaded but unverified".
+    let verified = false;
+    try {
+      const check = await fetchVideoObjectStatus(record.id, record.ext);
+      if (check.status === "present" && check.size !== null) {
+        verified = check.size === blob.size;
+        if (!verified) {
+          console.warn("[save] byte-size mismatch", {
+            stored: check.size,
+            local: blob.size,
+          });
+        }
+      } else if (check.status === "missing") {
+        console.warn("[save] object reported missing right after upload");
+      }
+    } catch {
+      /* verification unavailable — uploaded but unverified */
+    }
+    return { ok: true, localOnly: false, message: undefined, verified };
   }
   return {
     ok: localSaved,
@@ -231,7 +256,12 @@ export async function saveRecording(
 export async function retryUpload(
   rec: VideoRecord,
   blob: Blob,
-): Promise<{ ok: boolean; localOnly: boolean; message: string | undefined }> {
+): Promise<{
+  ok: boolean;
+  localOnly: boolean;
+  message: string | undefined;
+  verified?: boolean;
+}> {
   const uploaded = await uploadBlobViaProxy(rec.id, rec.ext, blob, rec.mimeType);
   if (uploaded) {
     const cloudRecord = { ...rec, localOnly: false };
@@ -241,7 +271,25 @@ export async function retryUpload(
     } catch {
       /* best-effort */
     }
-    return { ok: true, localOnly: false, message: undefined };
+    // Best-effort byte-size verification (see saveRecording). A successful
+    // retry does not by itself prove the stored bytes match — compare the
+    // object's content-length to the source Blob where available.
+    let verified = false;
+    try {
+      const check = await fetchVideoObjectStatus(rec.id, rec.ext);
+      if (check.status === "present" && check.size !== null) {
+        verified = check.size === blob.size;
+        if (!verified) {
+          console.warn("[retry] byte-size mismatch", {
+            stored: check.size,
+            local: blob.size,
+          });
+        }
+      }
+    } catch {
+      /* verification unavailable — uploaded but unverified */
+    }
+    return { ok: true, localOnly: false, message: undefined, verified };
   }
   return {
     ok: false,

@@ -93,3 +93,27 @@ export interface MoveResult {
   /** True when only the local IndexedDB cache was updated (no cloud write). */
   localOnly?: boolean;
 }
+
+/**
+ * Result of verifying a recording's video binary in Cloud Storage,
+ * independent of its metadata. `status` is explicit so the client never has
+ * to infer verification from a network failure:
+ *   - "present": storage returned a HEAD 2xx for the object path.
+ *   - "missing": storage returned 404 (object not found) — the ONLY status
+ *     that proves the object is absent. Other 4xx (400, 403, …) are
+ *     auth/path errors, not missing-object proof, and map to "unknown".
+ *   - "unknown": any other non-ok response OR a network/transport failure.
+ *     The recording stays visible (it may exist) but is NOT claimed as
+ *     verified in cloud storage; the check may be retried.
+ * `size` is the object's content-length when available (best-effort
+ * byte-size comparison against the source Blob). `error` preserves
+ * diagnostic detail for non-present cases.
+ */
+export type VideoObjectStatus = "present" | "missing" | "unknown";
+
+export interface VideoObjectCheck {
+  status: VideoObjectStatus;
+  size: number | null;
+  configured: boolean;
+  error?: string;
+}

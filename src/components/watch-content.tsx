@@ -78,15 +78,17 @@ export function WatchContent({
   const [hasLocalBlob, setHasLocalBlob] = useState<boolean | null>(null);
   useEffect(() => {
     if (!video.data) return;
-    // Only probe when we might need recovery (localOnly, or cloud binary
-    // confirmed missing).
+    // Only probe local IndexedDB when recovery is plausible: the record is
+    // flagged localOnly (upload never confirmed) OR the cloud binary is
+    // confirmed missing (404). An "unknown" verification status does NOT mean
+    // missing, so we don't offer recovery for it — the file may still exist.
     if (video.data.localOnly) {
       getBlob(video.data.id)
         .then((b) => setHasLocalBlob(!!b && b.size > 0))
         .catch(() => setHasLocalBlob(false));
       return;
     }
-    if (objectStatus.data && !objectStatus.data.exists) {
+    if (objectStatus.data?.status === "missing") {
       getBlob(video.data.id)
         .then((b) => setHasLocalBlob(!!b && b.size > 0))
         .catch(() => setHasLocalBlob(false));
@@ -94,7 +96,9 @@ export function WatchContent({
   }, [video.data, objectStatus.data]);
 
   const cloudBinaryMissing =
-    !!video.data && !video.data.localOnly && objectStatus.data?.exists === false;
+    !!video.data && !video.data.localOnly && objectStatus.data?.status === "missing";
+  const cloudBinaryUnverified =
+    !!video.data && !video.data.localOnly && objectStatus.data?.status === "unknown";
 
   useEffect(() => {
     let revoke: string | null = null;
@@ -197,6 +201,13 @@ export function WatchContent({
       setSyncing(false);
     }
   }, [qc, video.data, videoId]);
+
+  // Re-run the cloud-object verification (present/missing/unknown) when a
+  // previous attempt came back "unknown" — a transient storage/transport
+  // error should not permanently leave the recording unverified.
+  const handleRetryVerify = useCallback(() => {
+    qc.invalidateQueries({ queryKey: ["video-object", videoId] });
+  }, [qc, videoId]);
 
   const [genState, setGenState] = useState<{
     generating: boolean;
@@ -314,7 +325,7 @@ export function WatchContent({
               <AlertTriangle className="size-4 shrink-0 text-warning" />
               <span className="flex-1">
                 {hasLocalBlob === false
-                  ? "The video file is missing from Cloud storage and no local copy was found on this device. It cannot be recovered from metadata alone — re-record it on the original device."
+                  ? "The video file is missing from Cloud storage, and no local copy was found on this device. Open this recording on the device that created it and use “Sync to Cloud” to recover it from that device’s local copy."
                   : "The video file is missing from Cloud storage. A local copy was found on this device — sync it to Cloud so the share link works everywhere."}
               </span>
               {hasLocalBlob ? (
@@ -332,6 +343,27 @@ export function WatchContent({
                   {syncing ? "Syncing…" : "Sync to Cloud"}
                 </button>
               ) : null}
+            </div>
+          ) : cloudBinaryUnverified ? (
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex flex-wrap items-center gap-2 rounded-xl border border-warning/30 bg-warning/5 p-3 text-sm text-foreground"
+            >
+              <AlertTriangle className="size-4 shrink-0 text-warning" />
+              <span className="flex-1">
+                Cloud status for this recording could not be verified (storage unreachable or
+                returned an error). The recording is still shown — the file may exist. Try verifying
+                again.
+              </span>
+              <button
+                type="button"
+                onClick={handleRetryVerify}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
+              >
+                <CloudUpload className="size-3.5" />
+                Retry verify
+              </button>
             </div>
           ) : null}
           {urlError ? (
