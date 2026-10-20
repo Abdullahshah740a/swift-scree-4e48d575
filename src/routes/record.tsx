@@ -269,7 +269,7 @@ function RecordPage() {
                     backgroundColor: justUpdated ? "oklch(0.62 0.19 145)" : "var(--primary)",
                   }}
                 >
-                  <Check className="size-4" /> {justUpdated ? "Updated!" : "Update details"}
+                  <Check className="size-4" /> {justUpdated ? "Details Updated!" : "Update details"}
                 </button>
                 <button
                   onClick={handleNewOrReset}
