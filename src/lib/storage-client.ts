@@ -1,4 +1,6 @@
 import {
+  createFolder as createFolderFn,
+  deleteFolder as deleteFolderFn,
   deleteVideo as deleteVideoFn,
   getStorageStatus as getStorageStatusFn,
   getTranscript as getTranscriptFn,
@@ -7,6 +9,7 @@ import {
   listFolders as listFoldersFn,
   listReactions as listReactionsFn,
   listVideos as listVideosFn,
+  moveVideo as moveVideoFn,
   saveComments as saveCommentsFn,
   saveFolders as saveFoldersFn,
   saveReactions as saveReactionsFn,
@@ -23,7 +26,16 @@ import {
   putBlob,
   putVideoMeta,
 } from "./local-db";
-import type { Comment, Folder, Reaction, StorageStatus, Transcript, VideoRecord } from "./types";
+import type {
+  Comment,
+  Folder,
+  FolderOpResult,
+  MoveResult,
+  Reaction,
+  StorageStatus,
+  Transcript,
+  VideoRecord,
+} from "./types";
 import { safeCall, withTimeout } from "./with-timeout";
 
 const DEFAULT_STATUS: StorageStatus = {
@@ -144,6 +156,42 @@ export async function resolveVideoUrl(
   }
   const rec = await fetchVideoMeta(id);
   return { primary: rec?.storagePath ? remote : null, fallback: null };
+}
+
+/* ---- Strict folder/move operations (no swallow) ---- */
+
+/**
+ * Create a folder. The id is generated client-side so a retry cannot create
+ * duplicates. Surfaces a typed result so the UI can distinguish a real
+ * failure from success instead of swallowing it.
+ */
+export async function createFolderStrict(id: string, name: string): Promise<FolderOpResult> {
+  return withTimeout(createFolderFn({ data: { id, name } }), 12000);
+}
+
+export async function deleteFolderStrict(id: string): Promise<FolderOpResult> {
+  return withTimeout(deleteFolderFn({ data: { id } }), 12000);
+}
+
+/**
+ * Move a recording's folder assignment. Updates only metadata — the video
+ * binary is never relocated. Surfaces a typed result distinguishing a real
+ * failure ("not found", "invalid folder", transport) from a confirmed move.
+ * On a confirmed cloud move, syncs the local IndexedDB cache too.
+ */
+export async function moveVideoStrict(
+  videoId: string,
+  folderId: string | null,
+): Promise<MoveResult> {
+  const res = await withTimeout(moveVideoFn({ data: { videoId, folderId } }), 12000);
+  if (res.ok && res.record) {
+    try {
+      await putVideoMeta(res.record);
+    } catch {
+      /* local cache best-effort */
+    }
+  }
+  return res;
 }
 
 function blobToBase64(blob: Blob): Promise<string> {

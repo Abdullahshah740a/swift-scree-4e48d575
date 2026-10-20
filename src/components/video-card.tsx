@@ -9,11 +9,20 @@ import {
   FolderInput,
   Eye,
   Clock,
+  Loader2,
 } from "lucide-react";
 import type { Folder, VideoRecord } from "@/lib/types";
 import { formatDuration, formatRelativeTime, sourceTypeLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { SourceIcon } from "./source-icon";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 export function VideoCard({
   video,
@@ -21,19 +30,23 @@ export function VideoCard({
   onDelete,
   onMove,
   compact,
+  moving,
 }: {
   video: VideoRecord;
   folders: Folder[];
   onDelete?: ((video: VideoRecord) => void) | undefined;
   onMove?: ((video: VideoRecord, folderId: string | null) => void) | undefined;
-  compact?: boolean;
+  compact?: boolean | undefined;
+  moving?: boolean | undefined;
 }) {
   return (
     <div
       className={cn(
         "group relative rounded-xl border border-border/60 bg-card/70 transition-colors hover:border-primary/40",
         compact ? "flex items-center gap-3 pr-2" : "overflow-hidden",
+        moving && "opacity-70 ring-1 ring-primary/30",
       )}
+      aria-busy={moving || undefined}
     >
       <Link
         to="/watch/$id"
@@ -89,7 +102,13 @@ export function VideoCard({
               </p>
             </Link>
             {onDelete || onMove ? (
-              <CardMenu video={video} folders={folders} onDelete={onDelete} onMove={onMove} />
+              <CardMenu
+                video={video}
+                folders={folders}
+                onDelete={onDelete}
+                onMove={onMove}
+                moving={moving}
+              />
             ) : null}
           </div>
           <div className="mt-2 flex items-center gap-3 text-[11px] text-muted-foreground">
@@ -99,25 +118,28 @@ export function VideoCard({
             <span className="inline-flex items-center gap-1">
               <Clock className="size-3" /> {formatRelativeTime(video.createdAt)}
             </span>
+            {moving ? (
+              <span className="inline-flex items-center gap-1 text-primary">
+                <Loader2 className="size-3 animate-spin" /> Moving…
+              </span>
+            ) : null}
           </div>
         </div>
       )}
 
       {(onDelete || onMove) && compact ? (
-        <CardMenu video={video} folders={folders} onDelete={onDelete} onMove={onMove} compact />
+        <CardMenu
+          video={video}
+          folders={folders}
+          onDelete={onDelete}
+          onMove={onMove}
+          compact
+          moving={moving}
+        />
       ) : null}
     </div>
   );
 }
-
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 
 function CardMenu({
   video,
@@ -125,12 +147,14 @@ function CardMenu({
   onDelete,
   onMove,
   compact,
+  moving,
 }: {
   video: VideoRecord;
   folders: Folder[];
   onDelete?: ((video: VideoRecord) => void) | undefined;
   onMove?: ((video: VideoRecord, folderId: string | null) => void) | undefined;
-  compact?: boolean;
+  compact?: boolean | undefined;
+  moving?: boolean | undefined;
 }) {
   return (
     <div className="relative shrink-0">
@@ -138,11 +162,20 @@ function CardMenu({
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            disabled={moving}
+            className={cn(
+              "flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+              moving && "opacity-60",
+              compact && "size-7",
+            )}
             aria-label="More actions"
             onClick={(e) => e.stopPropagation()}
           >
-            <MoreVertical className="size-4" />
+            {moving ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <MoreVertical className="size-4" />
+            )}
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent

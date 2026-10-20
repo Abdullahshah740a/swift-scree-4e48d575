@@ -1,11 +1,29 @@
-import type { Comment, Folder, Reaction, StorageStatus, Transcript, VideoRecord } from "./types";
+import type {
+  Comment,
+  Folder,
+  FolderOpResult,
+  MoveResult,
+  Reaction,
+  StorageStatus,
+  Transcript,
+  VideoRecord,
+} from "./types";
 
 /**
  * Server-only Supabase Storage helpers.
  *
  * Env read inside each function (call-time injection). The bucket name may
  * contain spaces, so it is URL-encoded in every storage path.
+ *
+ * Folders are stored as independent objects at `folders/<id>.json` so that
+ * concurrent create/delete cannot clobber each other (a single
+ * `folders.json` whole-list overwrite is racy). A legacy `folders.json` is
+ * migrated on first read. Video moves only rewrite `meta/<id>.json` — the
+ * video binary is never touched.
  */
+
+const NOT_CONFIGURED_MSG =
+  "Cloud storage is not configured. Set SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_BUCKET.";
 
 function env() {
   return {
@@ -18,6 +36,18 @@ function env() {
 function configured(): boolean {
   const { url, key, bucket } = env();
   return Boolean(url && key && bucket);
+}
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : "Network error";
+}
+
+function notConfiguredFolder(): FolderOpResult {
+  return { ok: false, error: "not_configured", message: NOT_CONFIGURED_MSG };
+}
+
+function notConfiguredMove(): MoveResult {
+  return { ok: false, error: "not_configured", message: NOT_CONFIGURED_MSG };
 }
 
 async function sbFetch(path: string, init: RequestInit = {}, ms = 9000): Promise<Response> {
@@ -43,6 +73,28 @@ async function sbFetch(path: string, init: RequestInit = {}, ms = 9000): Promise
 
 function encodeBucket(bucket: string): string {
   return encodeURIComponent(bucket);
+}
+
+/** Run async work over `items` with at most `limit` in flight. */
+async function pool<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const ret: R[] = new Array(items.length);
+  let i = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      try {
+        ret[idx] = await fn(items[idx]!, idx);
+      } catch {
+        ret[idx] = undefined as unknown as R;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return ret;
 }
 
 export async function getStorageStatus(): Promise<StorageStatus> {
@@ -145,13 +197,11 @@ export async function listVideos(): Promise<VideoRecord[]> {
   if (!configured()) return [];
   try {
     const names = await listObjects("meta/");
-    const records: VideoRecord[] = [];
-    for (const name of names) {
-      if (!name.endsWith(".json")) continue;
-      const rec = await downloadJson<VideoRecord>(`meta/${name}`);
-      if (rec) records.push(rec);
-    }
-    return records.sort((a, b) => b.createdAt - a.createdAt);
+    const jsons = names.filter((n) => n.endsWith(".json"));
+    const recs = await pool(jsons, 6, (n) => downloadJson<VideoRecord>(`meta/${n}`));
+    return recs
+      .filter((r): r is VideoRecord => !!r && typeof r.id === "string")
+      .sort((a, b) => b.createdAt - a.createdAt);
   } catch {
     return [];
   }
@@ -200,13 +250,34 @@ export async function deleteVideo(id: string, ext: string): Promise<void> {
   }
 }
 
-/* ---- Folders ---- */
+/* ---- Folders (independent objects + legacy migration) ---- */
 
 export async function listFolders(): Promise<Folder[]> {
   if (!configured()) return [];
   try {
-    const data = await downloadJson<Folder[]>("folders.json");
-    return Array.isArray(data) ? data : [];
+    const names = await listObjects("folders/");
+    const jsons = names.filter((n) => n.endsWith(".json"));
+    if (jsons.length > 0) {
+      const recs = await pool(jsons, 6, (n) => downloadJson<Folder>(`folders/${n}`));
+      return recs
+        .filter((f): f is Folder => !!f && typeof f.id === "string" && typeof f.name === "string")
+        .sort((a, b) => a.createdAt - b.createdAt);
+    }
+    // Legacy migration: read the old whole-list file once and split it.
+    const legacy = await downloadJson<Folder[]>("folders.json");
+    if (Array.isArray(legacy) && legacy.length > 0) {
+      await Promise.all(
+        legacy.map((f) =>
+          uploadJson(`folders/${f.id}.json`, f).catch(() => {
+            /* best-effort migration */
+          }),
+        ),
+      );
+      return legacy
+        .filter((f) => typeof f.id === "string" && typeof f.name === "string")
+        .sort((a, b) => a.createdAt - b.createdAt);
+    }
+    return [];
   } catch {
     return [];
   }
@@ -215,6 +286,87 @@ export async function listFolders(): Promise<Folder[]> {
 export async function saveFolders(folders: Folder[]): Promise<void> {
   if (!configured()) return;
   await uploadJson("folders.json", folders);
+}
+
+export async function createFolder(id: string, name: string): Promise<FolderOpResult> {
+  if (!configured()) return notConfiguredFolder();
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return { ok: false, error: "invalid_input", message: "Folder name is required." };
+  }
+  if (trimmed.length > 100) {
+    return {
+      ok: false,
+      error: "invalid_input",
+      message: "Folder name must be 100 characters or fewer.",
+    };
+  }
+  const folder: Folder = { id, name: trimmed, createdAt: Date.now() };
+  try {
+    await uploadJson(`folders/${id}.json`, folder);
+    return { ok: true, folder };
+  } catch (e) {
+    return { ok: false, error: "transport", message: errMsg(e) };
+  }
+}
+
+export async function deleteFolder(id: string): Promise<FolderOpResult> {
+  if (!configured()) return notConfiguredFolder();
+  try {
+    // Remove the folder object (best-effort — it may already be gone).
+    try {
+      await removeObject(`folders/${id}.json`);
+    } catch {
+      /* ignore */
+    }
+    // Preserve its recordings by clearing their folder assignment.
+    const names = await listObjects("meta/");
+    const jsons = names.filter((n) => n.endsWith(".json"));
+    const owned = await pool(jsons, 6, (n) => downloadJson<VideoRecord>(`meta/${n}`));
+    for (const rec of owned) {
+      if (rec && rec.folderId === id) {
+        try {
+          await uploadJson(`meta/${rec.id}.json`, { ...rec, folderId: null });
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "transport", message: errMsg(e) };
+  }
+}
+
+/* ---- Video moves (metadata only — never touches the binary) ---- */
+
+export async function moveVideo(videoId: string, folderId: string | null): Promise<MoveResult> {
+  if (!configured()) return notConfiguredMove();
+  try {
+    if (folderId !== null) {
+      const dest = await downloadJson<Folder>(`folders/${folderId}.json`);
+      if (!dest) {
+        return {
+          ok: false,
+          error: "invalid_folder",
+          message: "Destination folder no longer exists.",
+        };
+      }
+    }
+    const rec = await downloadJson<VideoRecord>(`meta/${videoId}.json`);
+    if (!rec) {
+      return {
+        ok: false,
+        error: "not_found",
+        message: "Recording not found in cloud storage.",
+      };
+    }
+    const updated: VideoRecord = { ...rec, folderId };
+    await uploadJson(`meta/${videoId}.json`, updated);
+    return { ok: true, record: updated };
+  } catch (e) {
+    return { ok: false, error: "transport", message: errMsg(e) };
+  }
 }
 
 /* ---- Comments ---- */

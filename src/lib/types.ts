@@ -61,3 +61,28 @@ export interface StorageStatus {
   buckets: string[];
   error: string | null;
 }
+
+/**
+ * Discriminated result for folder/move mutations. The server returns a plain
+ * DTO (never throws for expected conditions) so the client can distinguish
+ * "not configured", "not found", "invalid folder", and transport failures
+ * instead of swallowing them into a success-shaped fallback.
+ */
+export type OpError =
+  "not_configured" | "not_found" | "invalid_folder" | "invalid_input" | "conflict" | "transport";
+
+export interface FolderOpResult {
+  ok: boolean;
+  error?: OpError;
+  message?: string;
+  folder?: Folder;
+}
+
+export interface MoveResult {
+  ok: boolean;
+  error?: OpError;
+  message?: string;
+  record?: VideoRecord | null;
+  /** True when only the local IndexedDB cache was updated (no cloud write). */
+  localOnly?: boolean;
+}

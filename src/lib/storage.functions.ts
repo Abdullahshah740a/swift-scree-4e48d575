@@ -1,6 +1,8 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import {
+  createFolder as createFolderServer,
+  deleteFolder as deleteFolderServer,
   deleteVideo as deleteVideoServer,
   getStorageStatus as getStorageStatusServer,
   getTranscript as getTranscriptServer,
@@ -9,6 +11,7 @@ import {
   listFolders as listFoldersServer,
   listReactions as listReactionsServer,
   listVideos as listVideosServer,
+  moveVideo as moveVideoServer,
   saveComments as saveCommentsServer,
   saveFolders as saveFoldersServer,
   saveReactions as saveReactionsServer,
@@ -62,6 +65,20 @@ export const saveFolders = createServerFn({ method: "POST" })
     await saveFoldersServer(data.folders as Folder[]);
     return { ok: true };
   });
+
+export const createFolder = createServerFn({ method: "POST" })
+  .validator((data) => z.object({ id: z.string(), name: z.string() }).parse(data))
+  .handler(async ({ data }) => createFolderServer(data.id, data.name));
+
+export const deleteFolder = createServerFn({ method: "POST" })
+  .validator((data) => z.object({ id: z.string() }).parse(data))
+  .handler(async ({ data }) => deleteFolderServer(data.id));
+
+export const moveVideo = createServerFn({ method: "POST" })
+  .validator((data) =>
+    z.object({ videoId: z.string(), folderId: z.string().nullable() }).parse(data),
+  )
+  .handler(async ({ data }) => moveVideoServer(data.videoId, data.folderId));
 
 export const listComments = createServerFn({ method: "GET" })
   .validator((data) => z.object({ videoId: z.string() }).parse(data))
