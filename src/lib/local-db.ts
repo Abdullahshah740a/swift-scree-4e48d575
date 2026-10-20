@@ -100,3 +100,31 @@ export async function getBlob(id: string): Promise<Blob | null> {
 export async function deleteBlob(id: string): Promise<void> {
   await tx(BLOB_STORE, "readwrite", (s) => s.delete(id));
 }
+
+/**
+ * Converted-MP4 cache lives in the same blob store under a namespaced key so
+ * a seekable MP4 produced in the browser is reused instantly on repeat
+ * downloads (and for local-only recordings whose cloud upload fell over).
+ */
+const MP4_PREFIX = "mp4:";
+
+export async function putMp4Blob(id: string, blob: Blob): Promise<void> {
+  await putBlob(MP4_PREFIX + id, blob);
+}
+
+export async function getMp4Blob(id: string): Promise<Blob | null> {
+  try {
+    const blob = await tx<Blob | undefined>(
+      BLOB_STORE,
+      "readonly",
+      (s) => s.get(MP4_PREFIX + id) as IDBRequest<Blob | undefined>,
+    );
+    return blob ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteMp4Blob(id: string): Promise<void> {
+  await deleteBlob(MP4_PREFIX + id);
+}

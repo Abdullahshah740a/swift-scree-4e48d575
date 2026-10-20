@@ -236,12 +236,41 @@ export async function uploadVideo(input: UploadVideoInput): Promise<void> {
   await saveVideoMeta(record);
 }
 
+/**
+ * Upload a browser-converted MP4 derivative (H.264/AAC, +faststart) to
+ * `videos/<id>.mp4` and stamp `mp4Path`/`mp4Size` on the existing metadata.
+ * The original recording is never touched. Subsequent "Download MP4" requests
+ * stream this object directly (video/mp4, attachment) without reconverting.
+ */
+export async function uploadMp4(input: { id: string; base64: string }): Promise<void> {
+  if (!configured()) return;
+  const { id, base64 } = input;
+  const raw = base64.includes(",") ? (base64.split(",")[1] ?? "") : base64;
+  const bin = Buffer.from(raw, "base64");
+  const bytes = new Uint8Array(bin);
+  const size = bytes.byteLength;
+  await uploadBytes(`videos/${id}.mp4`, bytes, "video/mp4");
+  const rec = await downloadJson<VideoRecord>(`meta/${id}.json`);
+  if (rec && typeof rec.id === "string") {
+    await uploadJson(`meta/${id}.json`, {
+      ...rec,
+      mp4Path: `videos/${id}.mp4`,
+      mp4Size: size,
+    });
+  }
+}
+
 export async function deleteVideo(id: string, ext: string): Promise<void> {
   if (!configured()) return;
   try {
     await removeObject(`videos/${id}.${ext}`);
   } catch {
     /* ignore */
+  }
+  try {
+    await removeObject(`videos/${id}.mp4`);
+  } catch {
+    /* ignore — mp4 derivative may not exist */
   }
   try {
     await removeObject(`meta/${id}.json`);

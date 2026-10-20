@@ -2,23 +2,19 @@ import { createFileRoute } from "@tanstack/react-router";
 import { getVideoMeta as getVideoMetaServer } from "@/lib/storage.server";
 
 // Public, anonymous video endpoint for the watch page and chromeless share
-// viewer.
+// viewer. Three modes:
 //
-// Two modes:
 //  - Playback (default): 302-redirect to a short-lived signed URL so the
 //    browser hits Cloud Storage's CDN directly. The CDN serves the file with
-//    full byte-range support, which <video> needs (the Edge worker can't honor
-//    Range requests, so a proxied body makes Chrome/Firefox refuse to decode
-//    WebM with "No video with supported format and MIME type").
-//  - Download (?download=1): stream the object THROUGH the Edge worker with
-//    Content-Disposition: attachment. The response is same-origin, so the
-//    browser saves the file instead of navigating to it. A plain signed-URL
-//    302 is cross-origin, and browsers IGNORE the <a download> attribute for
-//    cross-origin navigations — which is exactly why the download button
-//    wasn't downloading. The same-origin attachment response is the reliable
-//    fix; the client (triggerVideoDownload) additionally prefers the local
-//    IndexedDB blob, which is the only copy that exists for local-only
-//    recordings whose cloud blob upload fell over.
+//    full byte-range support, which <video> needs.
+//  - Download original (?download=1): stream the ORIGINAL recording through
+//    the worker with Content-Disposition: attachment. A same-origin attachment
+//    response forces a real save (browsers IGNORE <a download> for cross-origin
+//    redirects). The filename uses the truthful extension (.webm / .mp4).
+//  - Download MP4 (?mp4=1): stream the CONVERTED H.264/AAC derivative
+//    (videos/<id>.mp4) with Content-Type: video/mp4 + a .mp4 attachment
+//    filename. Only present after the browser converts and uploads it
+//    (rec.mp4Path is set). This is what "Download MP4" uses so VLC can seek.
 
 function extForMime(mime: string): string {
   return mime && mime.toLowerCase().includes("mp4") ? "mp4" : "webm";
@@ -50,59 +46,80 @@ export const Route = createFileRoute("/api/video/$id")({
         }
 
         const objectPath = `videos/${rec.id}.${rec.ext}`;
+        const mp4ObjectPath = `videos/${rec.id}.mp4`;
 
-        const wantDownload = request
-          ? (() => {
-              try {
-                return new URL(request.url).searchParams.has("download");
-              } catch {
-                return false;
-              }
-            })()
-          : false;
+        let wantDownload = false;
+        let wantMp4 = false;
+        try {
+          const sp = new URL(request.url).searchParams;
+          wantDownload = sp.has("download");
+          wantMp4 = sp.has("mp4");
+        } catch {
+          /* default to playback */
+        }
 
-        if (wantDownload) {
-          // Stream the object through the worker with Content-Disposition:
-          // attachment. Same-origin + attachment forces a real download
-          // regardless of container. Direct object GET with the service role
-          // key (no signed-URL round-trip, no expiry edge cases).
-          const objUrl = `${url}/storage/v1/object/${encodeURIComponent(bucket)}/${encodeURIComponent(objectPath)}`;
+        const fetchObject = async (path: string, ms = 60000): Promise<Response> => {
+          const objUrl = `${url}/storage/v1/object/${encodeURIComponent(bucket)}/${encodeURIComponent(path)}`;
           const controller = new AbortController();
-          // Generous: a download transfer may legitimately take a while; the
-          // timer only guards header fetch, the body streams after.
-          const timer = setTimeout(() => controller.abort(), 60000);
+          const timer = setTimeout(() => controller.abort(), ms);
           try {
-            const objRes = await fetch(objUrl, {
+            return await fetch(objUrl, {
               signal: controller.signal,
               headers: { apikey: key, Authorization: `Bearer ${key}` },
             });
+          } finally {
+            clearTimeout(timer);
+          }
+        };
+
+        // Download MP4: stream the converted H.264/AAC derivative with
+        // Content-Type: video/mp4 and a .mp4 attachment filename. Only present
+        // after the browser converts and uploads it (rec.mp4Path is set).
+        if (wantMp4) {
+          if (!rec.mp4Path) {
+            return new Response("MP4 not available yet", { status: 404 });
+          }
+          try {
+            const objRes = await fetchObject(mp4ObjectPath);
+            if (!objRes.ok || !objRes.body) {
+              return new Response("MP4 missing", { status: 502 });
+            }
+            const headers = new Headers();
+            headers.set("Content-Type", "video/mp4");
+            headers.set("Content-Disposition", `attachment; filename="${slugify(rec.title)}.mp4"`);
+            headers.set("Cache-Control", "private, max-age=300");
+            const len = objRes.headers.get("content-length");
+            if (len) headers.set("Content-Length", len);
+            return new Response(objRes.body, { status: 200, headers });
+          } catch {
+            return new Response("MP4 unreachable", { status: 502 });
+          }
+        }
+
+        // Download original: stream the original recording with a truthful
+        // extension (.webm for WebM, .mp4 only for genuine MP4). Same-origin +
+        // attachment forces a real save regardless of container.
+        if (wantDownload) {
+          try {
+            const objRes = await fetchObject(objectPath);
             if (!objRes.ok || !objRes.body) {
               return new Response("Video missing", { status: 502 });
             }
             const headers = new Headers();
             headers.set("Content-Type", rec.mimeType || extForMime(rec.mimeType));
-            // The downloaded file always carries a .mp4 extension regardless of
-            // the stored container — the underlying bytes are not transcoded,
-            // only the on-disk filename is normalized to .mp4.
-            const filename = `${slugify(rec.title)}.mp4`;
+            const filename = `${slugify(rec.title)}.${rec.ext || extForMime(rec.mimeType)}`;
             headers.set("Content-Disposition", `attachment; filename="${filename}"`);
             headers.set("Cache-Control", "private, max-age=300");
             const len = objRes.headers.get("content-length");
             if (len) headers.set("Content-Length", len);
-            // Don't clear the timer in `finally` — clearing it here is fine
-            // (clearing the timer only cancels the timeout, it does NOT abort
-            // the already-returned streaming body).
-            clearTimeout(timer);
             return new Response(objRes.body, { status: 200, headers });
           } catch {
             return new Response("Video unreachable", { status: 502 });
-          } finally {
-            clearTimeout(timer);
           }
         }
 
-        // Playback mode: 302 to a signed URL (1 hour). The bucket name may
-        // contain spaces, so encode it in the path.
+        // Playback: 302 to a signed URL (1 hour). The bucket name may contain
+        // spaces, so encode it in the path.
         const signPath = `/storage/v1/object/sign/${encodeURIComponent(bucket)}/${encodeURIComponent(objectPath)}`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 9000);
@@ -125,7 +142,6 @@ export const Route = createFileRoute("/api/video/$id")({
           if (!signed) {
             return new Response("Video missing", { status: 502 });
           }
-          // signedURL may be relative ("/storage/v1/...") or absolute.
           const target = signed.startsWith("http")
             ? signed
             : `${url}${signed.startsWith("/") ? "" : "/"}${signed}`;

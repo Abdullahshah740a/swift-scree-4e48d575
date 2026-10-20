@@ -17,6 +17,7 @@ import {
   saveReactions as saveReactionsServer,
   saveTranscript as saveTranscriptServer,
   saveVideoMeta as saveVideoMetaServer,
+  uploadMp4 as uploadMp4Server,
   uploadVideo as uploadVideoServer,
 } from "./storage.server";
 import type { Comment, Folder, Reaction, Transcript, VideoRecord } from "./types";
@@ -45,6 +46,13 @@ export const uploadVideo = createServerFn({ method: "POST" })
       record: data.record as VideoRecord,
       base64: data.base64,
     });
+    return { ok: true };
+  });
+
+export const uploadMp4 = createServerFn({ method: "POST" })
+  .validator((data) => z.object({ id: z.string(), base64: z.string() }).parse(data))
+  .handler(async ({ data }) => {
+    await uploadMp4Server({ id: data.id, base64: data.base64 });
     return { ok: true };
   });
 

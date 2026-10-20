@@ -14,7 +14,15 @@ export interface VideoRecord {
   folderId?: string | null;
   views: number;
   createdAt: number;
-  storagePath?: string; // videos/<id>.<ext>
+  storagePath?: string; // videos/<id>.<ext> (original)
+  /**
+   * Converted MP4 derivative (H.264/AAC, +faststart). Produced on demand by
+   * the browser (ffmpeg.wasm) and uploaded under videos/<id>.mp4 so the same
+   * seekable MP4 is reused for every subsequent "Download MP4" and on other
+   * devices. The original recording fields above are never overwritten by it.
+   */
+  mp4Path?: string; // videos/<id>.mp4
+  mp4Size?: number; // bytes of the converted MP4
 }
 
 export interface Folder {
