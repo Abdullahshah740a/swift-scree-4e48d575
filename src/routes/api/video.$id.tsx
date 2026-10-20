@@ -174,10 +174,24 @@ export const Route = createFileRoute("/api/video/$id")({
           if (!signed) {
             return new Response("Video missing", { status: 502 });
           }
-          // signedURL may be relative ("/storage/v1/...") or absolute.
-          const target = signed.startsWith("http")
-            ? signed
-            : `${url}${signed.startsWith("/") ? "" : "/"}${signed}`;
+          // signedURL may be relative ("/storage/v1/object/sign/...") or
+          // absolute. In practice the Storage API returns a path WITHOUT the
+          // `/storage/v1` API prefix (e.g. "/object/sign/..."). Naively
+          // prepending only the project URL yields
+          // "<url>/object/sign/..." which the CDN rejects with
+          // 404 {"error":"requested path is invalid"} — the second half of the
+          // delivery defect (the first was the %2F-encoded object path). The
+          // signed GET requires the full API path "/storage/v1/object/sign/...",
+          // so normalize a relative signedURL to include the prefix before
+          // joining it to the project URL. Verified: with the prefix the CDN
+          // returns 200 video/webm at the object's full byte size.
+          let target: string;
+          if (signed.startsWith("http")) {
+            target = signed;
+          } else {
+            const path = signed.startsWith("/") ? signed : `/${signed}`;
+            target = path.startsWith("/storage/v1") ? `${url}${path}` : `${url}/storage/v1${path}`;
+          }
           return new Response(null, {
             status: 302,
             headers: {
