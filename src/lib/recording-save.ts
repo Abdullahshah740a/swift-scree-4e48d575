@@ -11,9 +11,10 @@ export interface FinalizeContext {
 
 export interface FinalizeResult {
   ok: boolean;
-  reason?: string;
-  record?: VideoRecord;
-  localOnly?: boolean;
+  reason?: string | undefined;
+  record?: VideoRecord | undefined;
+  localOnly?: boolean | undefined;
+  message?: string | undefined;
 }
 
 /**
@@ -71,9 +72,19 @@ export async function finalizeAndSaveRecording(
       }
     });
 
-    return { ok: true, record, localOnly: result.localOnly };
+    return {
+      ok: true,
+      record,
+      localOnly: result.localOnly,
+      message: result.message,
+    };
   } catch (e) {
     console.error("[record] save failed", e);
-    return { ok: true, record, localOnly: true };
+    return {
+      ok: true,
+      record,
+      localOnly: true,
+      message: "Cloud upload failed — saved locally only.",
+    };
   }
 }
