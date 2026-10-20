@@ -50,6 +50,17 @@ function encodeBucket(bucket: string): string {
 export const Route = createFileRoute("/api/upload/$id")({
   server: {
     handlers: {
+      // Reachability probe: a GET returns 200 so the client can verify the
+      // route is reachable from the browser BEFORE attempting the POST.
+      // If this GET also fails with "Failed to fetch", the issue is route
+      // reachability (network/gateway), not the POST body.
+      GET: async ({ params }) => {
+        const id = String((params as { id?: string }).id ?? "");
+        return new Response(JSON.stringify({ ok: true, id }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
       POST: async ({ params, request }) => {
         const id = String((params as { id?: string }).id ?? "");
         const startedAt = Date.now();

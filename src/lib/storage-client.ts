@@ -179,10 +179,57 @@ async function uploadBlobDirect(
     rawName: null,
   };
 
-  // Same-origin POST to the Edge worker proxy. The proxy forwards the bytes
-  // to Cloud Storage with the service-role key; the browser never makes a
-  // cross-origin request, so there is no CORS preflight to reject. Bounded by
-  // an AbortController so a stall surfaces as a real error instead of hanging.
+  // 1) Reachability probe: a tiny GET to the same route. If this also fails
+  //    with "Failed to fetch", the cause is route reachability (network/
+  //    gateway/CSP), NOT the POST body or size — and we surface that
+  //    distinction in the diagnostic instead of guessing.
+  try {
+    const probe = await fetch(`/api/upload/${id}`, {
+      method: "GET",
+      // short, bounded — a route-reachability check should never take long
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!probe.ok) {
+      const msg = `Upload route unreachable (GET ${probe.status})`;
+      console.warn("[upload] probe failed:", probe.status);
+      return {
+        ok: false,
+        error: msg,
+        diag: {
+          ...base,
+          stage: "upload",
+          failed: true,
+          elapsedMs: Date.now() - startedAtMs,
+          httpStatus: probe.status,
+          errorKind: "server-rejected",
+          errorMessage: msg,
+          rawName: "Probe",
+        },
+      };
+    }
+  } catch (e) {
+    const msg = "Upload route not reachable from browser (GET failed)";
+    console.warn("[upload] probe threw:", e instanceof Error ? e.name : "Error");
+    return {
+      ok: false,
+      error: msg,
+      diag: {
+        ...base,
+        stage: "upload",
+        failed: true,
+        elapsedMs: Date.now() - startedAtMs,
+        httpStatus: null,
+        errorKind: "route-unreachable",
+        errorMessage: msg,
+        rawName: e instanceof Error ? e.name : "Error",
+      },
+    };
+  }
+
+  // 2) Same-origin POST to the Edge worker proxy. The proxy forwards the bytes
+  //    to Cloud Storage with the service-role key; the browser never makes a
+  //    cross-origin request, so there is no CORS preflight to reject. Bounded by
+  //    an AbortController so a stall surfaces as a real error instead of hanging.
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120_000);
   try {
