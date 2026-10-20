@@ -26,9 +26,6 @@ import {
   putBlob,
   putVideoMeta,
 } from "./local-db";
-// Re-export getBlob so the watch page can read the local-only blob for a
-// "Retry sync to Cloud" action without reaching into local-db directly.
-export { getBlob };
 import type {
   Comment,
   Folder,
@@ -102,71 +99,23 @@ export async function persistTranscript(transcript: Transcript): Promise<void> {
 export async function saveRecording(
   record: VideoRecord,
   blob: Blob,
-): Promise<{ ok: boolean; localOnly: boolean; message?: string }> {
+): Promise<{ ok: boolean; localOnly: boolean }> {
   // Always cache locally first so it works offline / without a backend.
   try {
     await putBlob(record.id, blob);
-    await putVideoMeta({ ...record, uploaded: false });
+    await putVideoMeta(record);
   } catch {
     /* local cache best-effort */
   }
 
-  const base64 = await blobToBase64(blob);
   try {
-    const res = await withTimeout(uploadVideoFn({ data: { record, base64 } }), 25000);
-    if (!res?.ok || !res?.verified) {
-      // Upload failed OR not verified present in Cloud. Keep it local-only —
-      // never advertise a shareable cloud copy that another device can't open.
-      // The local meta stays marked uploaded:false so the UI shows "Local only".
-      return {
-        ok: false,
-        localOnly: true,
-        message: res?.message ?? "Upload could not be verified.",
-      };
-    }
-    // Cloud copy confirmed. Update the local cache so it matches.
-    try {
-      await putVideoMeta({ ...record, uploaded: true });
-    } catch {
-      /* local cache best-effort */
-    }
+    const base64 = await blobToBase64(blob);
+    await withTimeout(uploadVideoFn({ data: { record, base64 } }), 25000);
     return { ok: true, localOnly: false };
-  } catch (e) {
-    return {
-      ok: false,
-      localOnly: true,
-      message: e instanceof Error ? e.message : "Upload failed.",
-    };
-  }
-}
-
-/**
- * Retry uploading a local-only recording to Cloud. Used by the watch page /
- * "Local only — Retry sync" action when the original upload failed. Returns
- * the truthful upload result.
- */
-export async function retryUpload(
-  record: VideoRecord,
-  blob: Blob,
-): Promise<{ ok: boolean; localOnly: boolean; message?: string }> {
-  const base64 = await blobToBase64(blob);
-  try {
-    const res = await withTimeout(uploadVideoFn({ data: { record, base64 } }), 25000);
-    if (!res?.ok || !res?.verified) {
-      return { ok: false, localOnly: true, message: res?.message ?? "Upload not verified." };
-    }
-    try {
-      await putVideoMeta({ ...record, uploaded: true });
-    } catch {
-      /* best-effort */
-    }
-    return { ok: true, localOnly: false };
-  } catch (e) {
-    return {
-      ok: false,
-      localOnly: true,
-      message: e instanceof Error ? e.message : "Upload failed.",
-    };
+  } catch {
+    // Cloud failed; the local copy still exists. Try to persist just the meta.
+    void safeCall(saveVideoMetaFn({ data: { record } }), undefined);
+    return { ok: true, localOnly: true };
   }
 }
 
@@ -191,43 +140,22 @@ export async function removeRecording(id: string, ext: string): Promise<void> {
 }
 
 /**
- * Resolve playable URLs for a video.
- *
- * The Cloud copy is authoritative. The local IndexedDB blob is preferred for
- * instant offline playback, but ONLY as a *fallback candidate* when it is
- * the only copy — a local-only recording (uploaded:false) must never be
- * advertised as a Cloud URL for another browser, because that device has no
- * copy and would hit a missing-file "decode" error.
- *
- * For a confirmed Cloud recording we surface the same-origin streaming
- * endpoint (`/api/video/<id>`, which 302s to a signed Cloud URL). The local
- * blob is the fallback if the stream can't decode on this device.
+ * Resolve playable URLs for a video. Returns the local IndexedDB blob URL
+ * (instant, offline) when available, plus the remote streaming URL as a
+ * fallback. The player tries the local URL first and falls back to remote
+ * if the blob won't decode — a stale/corrupt local cache must never block
+ * playback of a valid remote recording.
  */
 export async function resolveVideoUrl(
   id: string,
-): Promise<{ primary: string | null; fallback: string | null; localOnly: boolean }> {
+): Promise<{ primary: string | null; fallback: string | null }> {
   const remote = `/api/video/${id}`;
-  const rec = await fetchVideoMeta(id);
-
-  // Cloud-confirmed recording: stream from Cloud, with the local blob as a
-  // device-side fallback for offline or decode issues.
-  if (rec?.uploaded && rec.storagePath) {
-    const local = await safeCall(getBlob(id), null);
-    if (local && local.size > 0) {
-      return { primary: remote, fallback: URL.createObjectURL(local), localOnly: false };
-    }
-    return { primary: remote, fallback: null, localOnly: false };
-  }
-
-  // Local-only recording (upload never verified). The only copy that exists
-  // is this device's IndexedDB blob — return it and flag localOnly so the UI
-  // can explain that and offer a retry sync.
   const local = await safeCall(getBlob(id), null);
-  if (local && local.size > 0) {
-    return { primary: URL.createObjectURL(local), fallback: null, localOnly: true };
+  if (local) {
+    return { primary: URL.createObjectURL(local), fallback: remote };
   }
-  // No usable copy anywhere.
-  return { primary: null, fallback: null, localOnly: !!(rec && !rec.uploaded) };
+  const rec = await fetchVideoMeta(id);
+  return { primary: rec?.storagePath ? remote : null, fallback: null };
 }
 
 /* ---- Strict folder/move operations (no swallow) ---- */

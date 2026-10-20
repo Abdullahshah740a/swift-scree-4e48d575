@@ -1,20 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Loader2, Eye, Clock, User, RefreshCw } from "lucide-react";
+import { AlertTriangle, Loader2, Eye, Clock, User } from "lucide-react";
 import type { Comment, Reaction, Transcript } from "@/lib/types";
 import {
   fetchComments,
   fetchReactions,
   fetchTranscript,
   fetchVideoMeta,
-  getBlob,
   persistComments,
   persistReactions,
   persistTranscript,
   removeRecording,
   resolveVideoUrl,
-  retryUpload,
 } from "@/lib/storage-client";
 import { transcribeVideo } from "@/lib/transcript";
 import { formatDuration, formatRelativeTime, sourceTypeLabel } from "@/lib/format";
@@ -41,9 +39,7 @@ export function WatchContent({
   const [current, setCurrent] = useState(0);
   const [url, setUrl] = useState<string | null>(null);
   const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
-  const [localOnly, setLocalOnly] = useState(false);
   const [urlError, setUrlError] = useState<string | null>(null);
-  const [syncing, setSyncing] = useState(false);
 
   const video = useQuery({
     queryKey: ["video", videoId],
@@ -64,31 +60,24 @@ export function WatchContent({
 
   useEffect(() => {
     let revoke: string | null = null;
-    let revokeFallback: string | null = null;
     setUrl(null);
     setUrlError(null);
-    setLocalOnly(false);
     resolveVideoUrl(videoId)
-      .then(({ primary, fallback, localOnly: lo }) => {
+      .then(({ primary, fallback }) => {
         if (primary) {
           setUrl(primary);
-          if (primary.startsWith("blob:")) revoke = primary;
-          setFallbackUrl(fallback ?? null);
-          if (fallback && fallback.startsWith("blob:")) revokeFallback = fallback;
-          setLocalOnly(Boolean(lo));
+          revoke = primary;
+          setFallbackUrl(fallback);
         } else if (fallback) {
           setUrl(fallback);
-          if (fallback.startsWith("blob:")) revoke = fallback;
           setFallbackUrl(null);
-          setLocalOnly(Boolean(lo));
         } else {
           setUrlError("No video file available for this recording.");
         }
       })
       .catch(() => setUrlError("Could not load video."));
     return () => {
-      if (revoke) URL.revokeObjectURL(revoke);
-      if (revokeFallback) URL.revokeObjectURL(revokeFallback);
+      if (revoke && revoke.startsWith("blob:")) URL.revokeObjectURL(revoke);
     };
   }, [videoId]);
 
@@ -141,35 +130,6 @@ export function WatchContent({
       setDeleting(false);
     }
   }, [navigate, qc, video.data]);
-
-  // Retry uploading a local-only recording's bytes to Cloud. Only available
-  // on the device that still has the IndexedDB blob, so the recording can
-  // become shareable to other browsers/devices.
-  const handleRetrySync = useCallback(async () => {
-    const recMeta = video.data;
-    if (!recMeta) return;
-    setSyncing(true);
-    try {
-      const blob = await getBlob(recMeta.id);
-      if (!blob || blob.size === 0) {
-        toast.error("Local copy not found on this device. Open the recording on the device that made it.");
-        return;
-      }
-      const res = await retryUpload(recMeta, blob);
-      if (res.ok && !res.localOnly) {
-        qc.invalidateQueries({ queryKey: ["video", videoId] });
-        qc.invalidateQueries({ queryKey: ["videos"] });
-        setLocalOnly(false);
-        toast.success("Synced to Cloud — now shareable on other devices.");
-      } else {
-        toast.error(res.message ?? "Could not sync to Cloud. Try again later.");
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not sync to Cloud.");
-    } finally {
-      setSyncing(false);
-    }
-  }, [qc, video.data, videoId]);
 
   const [genState, setGenState] = useState<{
     generating: boolean;
@@ -262,23 +222,6 @@ export function WatchContent({
               </span>
             </div>
           ) : null}
-          {localOnly && !urlError ? (
-            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-foreground">
-              <AlertTriangle className="size-4 shrink-0 text-warning" />
-              <span className="flex-1">
-                Local only — not synced to Cloud. Other devices can't open this recording yet.
-              </span>
-              <button
-                type="button"
-                onClick={handleRetrySync}
-                disabled={syncing}
-                className="inline-flex items-center gap-2 rounded-lg border border-input bg-background px-3 py-1.5 text-xs font-semibold text-foreground transition-colors hover:bg-accent disabled:opacity-60"
-              >
-                {syncing ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-                {syncing ? "Syncing…" : "Retry sync to Cloud"}
-              </button>
-            </div>
-          ) : null}
           <VideoPlayer
             ref={playerRef}
             src={url ?? ""}
@@ -287,7 +230,6 @@ export function WatchContent({
             comments={comments.data ?? []}
             reactions={reactions.data ?? []}
             onTimeUpdate={setCurrent}
-            localOnly={localOnly}
           />
           <ReactionBar
             reactions={reactions.data ?? []}

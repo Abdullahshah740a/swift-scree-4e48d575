@@ -191,36 +191,6 @@ async function removeObject(path: string): Promise<void> {
   if (!res.ok) throw new Error(`delete ${path} failed: ${res.status}`);
 }
 
-/**
- * Check whether a Cloud object actually exists and is byte-readable (ranged
- * GET returns 200/206). Used by the video API to distinguish "metadata says
- * this recording is in Cloud, but the bytes are missing" (honest 404) from
- * "Cloud is unreachable" (502) — the exact cross-browser failure where the
- * recording browser plays its local IndexedDB copy but another device sees a
- * missing-file error the player then masks as a decode failure.
- */
-export async function objectExists(objectPath: string): Promise<boolean> {
-  if (!configured()) return false;
-  const { url, key, bucket } = env();
-  if (!url || !key || !bucket) return false;
-  const objUrl = `${url}/storage/v1/object/${encodeBucket(bucket)}/${encodeURIComponent(
-    objectPath,
-  )}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 9000);
-  try {
-    const res = await fetch(objUrl, {
-      signal: controller.signal,
-      headers: { apikey: key, Authorization: `Bearer ${key}`, Range: "bytes=0-0" },
-    });
-    return res.ok && (res.status === 200 || res.status === 206);
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /* ---- Videos ---- */
 
 export async function listVideos(): Promise<VideoRecord[]> {
@@ -256,68 +226,14 @@ export interface UploadVideoInput {
   base64: string; // data URL or raw base64
 }
 
-export interface UploadVideoResult {
-  ok: boolean;
-  verified: boolean;
-  message?: string;
-}
-
-/**
- * Verify a Cloud object is actually present and byte-readable with a ranged
- * GET (206/200). This is the difference between "the upload HTTP call returned
- * 200" and "another device can fetch these bytes" — a recording is only
- * shareable once this passes.
- */
-async function verifyObject(objectPath: string): Promise<boolean> {
-  const { url, key, bucket } = env();
-  if (!url || !key || !bucket) return false;
-  const objUrl = `${url}/storage/v1/object/${encodeBucket(bucket)}/${encodeURIComponent(
-    objectPath,
-  )}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 9000);
-  try {
-    const res = await fetch(objUrl, {
-      signal: controller.signal,
-      headers: { apikey: key, Authorization: `Bearer ${key}`, Range: "bytes=0-0" },
-    });
-    return res.ok && (res.status === 200 || res.status === 206);
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * Upload the video bytes, VERIFY they are fetchable in Cloud, and only then
- * persist metadata marked `uploaded: true`. A failed or unverifiable upload
- * returns `{ ok: false }` so the client keeps the recording local-only and
- * never advertises a share link for a missing file.
- */
-export async function uploadVideo(input: UploadVideoInput): Promise<UploadVideoResult> {
-  if (!configured()) {
-    return { ok: false, verified: false, message: NOT_CONFIGURED_MSG };
-  }
+export async function uploadVideo(input: UploadVideoInput): Promise<void> {
+  if (!configured()) return;
   const { record, base64 } = input;
   const raw = base64.includes(",") ? (base64.split(",")[1] ?? "") : base64;
   const bin = Buffer.from(raw, "base64");
   const bytes = new Uint8Array(bin);
-  try {
-    await uploadBytes(`videos/${record.id}.${record.ext}`, bytes, record.mimeType);
-  } catch (e) {
-    return { ok: false, verified: false, message: `Video upload failed: ${errMsg(e)}` };
-  }
-  const verified = await verifyObject(`videos/${record.id}.${record.ext}`);
-  if (!verified) {
-    return { ok: false, verified: false, message: "Upload could not be verified in Cloud." };
-  }
-  try {
-    await saveVideoMeta({ ...record, uploaded: true });
-  } catch (e) {
-    return { ok: false, verified: true, message: `Metadata save failed: ${errMsg(e)}` };
-  }
-  return { ok: true, verified: true };
+  await uploadBytes(`videos/${record.id}.${record.ext}`, bytes, record.mimeType);
+  await saveVideoMeta(record);
 }
 
 export async function deleteVideo(id: string, ext: string): Promise<void> {

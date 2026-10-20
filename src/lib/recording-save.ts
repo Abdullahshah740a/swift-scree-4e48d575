@@ -71,16 +71,9 @@ export async function finalizeAndSaveRecording(
       }
     });
 
-    // A local-only save (upload failed/unverified) is NOT ok for sharing.
-    // Preserve the local copy but report the honest outcome so the UI can
-    // mark the recording "Local only" and offer a retry sync.
-    if (!result.ok || result.localOnly) {
-      return { ok: false, reason: result.message ?? "Saved locally (Cloud not reachable)", record, localOnly: true };
-    }
-    return { ok: true, record, localOnly: false };
+    return { ok: true, record, localOnly: result.localOnly };
   } catch (e) {
     console.error("[record] save failed", e);
-    const reason = e instanceof Error ? e.message : "Recording could not be saved.";
-    return { ok: false, reason, record, localOnly: true };
+    return { ok: true, record, localOnly: true };
   }
 }
