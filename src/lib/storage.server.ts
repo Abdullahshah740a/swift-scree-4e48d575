@@ -287,6 +287,45 @@ export async function deleteVideo(id: string, ext: string): Promise<void> {
   }
 }
 
+/**
+ * Check whether a recording's video binary actually exists in Cloud Storage,
+ * independent of its metadata. Returns { exists, size } so the client can
+ * detect a pre-`localOnly` recording whose metadata was saved but whose
+ * binary upload failed (the old base64-over-RPC timeout path) and offer a
+ * recovery/retry from the local IndexedDB blob. `size` is the object's
+ * content-length when available.
+ */
+export async function checkVideoObject(
+  id: string,
+  ext: string,
+): Promise<{ exists: boolean; size: number | null; configured: boolean }> {
+  if (!configured()) return { exists: false, size: null, configured: false };
+  const { url, bucket } = env();
+  const objectPath = `videos/${id}.${ext}`;
+  try {
+    const res = await sbFetch(
+      `/storage/v1/object/${encodeBucket(bucket)}/${encodeURIComponent(objectPath)}`,
+      { method: "HEAD" },
+    );
+    if (res.status === 404 || res.status === 400) {
+      return { exists: false, size: null, configured: true };
+    }
+    if (!res.ok) {
+      // Treat other errors as "unknown" — don't claim missing.
+      return { exists: true, size: null, configured: true };
+    }
+    const len = res.headers.get("content-length");
+    return {
+      exists: true,
+      size: len ? Number(len) : null,
+      configured: true,
+    };
+  } catch {
+    // Network failure — don't claim missing; let playback attempt proceed.
+    return { exists: true, size: null, configured: true };
+  }
+}
+
 /* ---- Folders (independent objects + legacy migration) ---- */
 
 export async function listFolders(): Promise<Folder[]> {

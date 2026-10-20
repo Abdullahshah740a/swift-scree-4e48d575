@@ -8,6 +8,7 @@ import {
   fetchReactions,
   fetchTranscript,
   fetchVideoMeta,
+  fetchVideoObjectStatus,
   persistComments,
   persistReactions,
   persistTranscript,
@@ -59,6 +60,41 @@ export function WatchContent({
     queryKey: ["transcript", videoId],
     queryFn: () => fetchTranscript(videoId),
   });
+
+  // Detect a missing cloud binary for recordings made before the localOnly
+  // flag existed: they have cloud metadata but no cloud video object (the old
+  // base64-over-RPC upload timed out, meta was saved anyway). Only check when
+  // the record is NOT already flagged localOnly (those already show the sync
+  // banner) and we have the ext to build the object path.
+  const objectStatus = useQuery({
+    queryKey: ["video-object", videoId],
+    queryFn: () => fetchVideoObjectStatus(videoId, video.data?.ext ?? "webm"),
+    enabled: !!video.data && !video.data.localOnly,
+  });
+
+  // Whether a local IndexedDB blob exists for this recording — recovery is
+  // only possible on the device that recorded it. Checked once the missing
+  // cloud binary is detected.
+  const [hasLocalBlob, setHasLocalBlob] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!video.data) return;
+    // Only probe when we might need recovery (localOnly, or cloud binary
+    // confirmed missing).
+    if (video.data.localOnly) {
+      getBlob(video.data.id)
+        .then((b) => setHasLocalBlob(!!b && b.size > 0))
+        .catch(() => setHasLocalBlob(false));
+      return;
+    }
+    if (objectStatus.data && !objectStatus.data.exists) {
+      getBlob(video.data.id)
+        .then((b) => setHasLocalBlob(!!b && b.size > 0))
+        .catch(() => setHasLocalBlob(false));
+    }
+  }, [video.data, objectStatus.data]);
+
+  const cloudBinaryMissing =
+    !!video.data && !video.data.localOnly && objectStatus.data?.exists === false;
 
   useEffect(() => {
     let revoke: string | null = null;
@@ -153,6 +189,7 @@ export function WatchContent({
         toast.success("Synced to Cloud — the share link now works everywhere.");
         qc.invalidateQueries({ queryKey: ["videos"] });
         qc.invalidateQueries({ queryKey: ["video", videoId] });
+        qc.invalidateQueries({ queryKey: ["video-object", videoId] });
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Sync failed");
@@ -267,6 +304,34 @@ export function WatchContent({
                 )}
                 {syncing ? "Syncing…" : "Sync to Cloud"}
               </button>
+            </div>
+          ) : cloudBinaryMissing ? (
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex flex-wrap items-center gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-foreground"
+            >
+              <AlertTriangle className="size-4 shrink-0 text-warning" />
+              <span className="flex-1">
+                {hasLocalBlob === false
+                  ? "The video file is missing from Cloud storage and no local copy was found on this device. It cannot be recovered from metadata alone — re-record it on the original device."
+                  : "The video file is missing from Cloud storage. A local copy was found on this device — sync it to Cloud so the share link works everywhere."}
+              </span>
+              {hasLocalBlob ? (
+                <button
+                  type="button"
+                  onClick={handleSyncToCloud}
+                  disabled={syncing}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
+                >
+                  {syncing ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <CloudUpload className="size-3.5" />
+                  )}
+                  {syncing ? "Syncing…" : "Sync to Cloud"}
+                </button>
+              ) : null}
             </div>
           ) : null}
           {urlError ? (

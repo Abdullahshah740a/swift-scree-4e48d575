@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import {
+  checkVideoObject as checkVideoObjectServer,
   createFolder as createFolderServer,
   createUploadUrl as createUploadUrlServer,
   deleteFolder as deleteFolderServer,
@@ -59,6 +60,10 @@ export const deleteVideo = createServerFn({ method: "POST" })
     await deleteVideoServer(data.id, data.ext);
     return { ok: true };
   });
+
+export const checkVideoObject = createServerFn({ method: "GET" })
+  .validator((data) => z.object({ id: z.string(), ext: z.string() }).parse(data))
+  .handler(async ({ data }) => checkVideoObjectServer(data.id, data.ext));
 
 export const listFolders = createServerFn({ method: "GET" }).handler(async () =>
   listFoldersServer(),

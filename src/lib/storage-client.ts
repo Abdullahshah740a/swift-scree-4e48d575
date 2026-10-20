@@ -1,4 +1,5 @@
 import {
+  checkVideoObject as checkVideoObjectFn,
   createFolder as createFolderFn,
   deleteFolder as deleteFolderFn,
   deleteVideo as deleteVideoFn,
@@ -68,6 +69,26 @@ export async function fetchVideoMeta(id: string): Promise<VideoRecord | null> {
   const remote = await safeCall(getVideoMetaFn({ data: { id } }), null);
   if (remote) return remote;
   return safeCall(getLocalMeta(id), null);
+}
+
+/**
+ * Check whether a recording's video binary actually exists in Cloud Storage.
+ * Used by the watch page to detect a pre-`localOnly` recording (no flag,
+ * cloud metadata present, but the binary upload failed under the old
+ * base64-over-RPC path) and offer a "Sync to Cloud" recovery from the local
+ * IndexedDB blob. Returns exists=false only on a confirmed 404/400; network
+ * errors are treated as "exists" so a transient failure never wrongly hides
+ * a recording.
+ */
+export async function fetchVideoObjectStatus(
+  id: string,
+  ext: string,
+): Promise<{ exists: boolean; size: number | null; configured: boolean }> {
+  return safeCall(checkVideoObjectFn({ data: { id, ext } }), {
+    exists: true,
+    size: null,
+    configured: true,
+  });
 }
 
 export async function fetchFolders(): Promise<Folder[]> {

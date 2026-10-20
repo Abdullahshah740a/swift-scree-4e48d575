@@ -76,8 +76,8 @@ export async function finalizeAndSaveRecording(
       ok: true,
       record,
       localOnly: result.localOnly,
+      message: result.message,
     };
-    if (result.message !== undefined) out.message = result.message;
     return out;
   } catch (e) {
     console.error("[record] save failed", e);
