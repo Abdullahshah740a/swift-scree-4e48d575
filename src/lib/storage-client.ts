@@ -24,7 +24,6 @@ import type {
 import { safeCall, withTimeout } from "./with-timeout";
 import {
   createFolder as createFolderFn,
-  createUploadUrl as createUploadUrlFn,
   deleteFolder as deleteFolderFn,
   deleteVideo as deleteVideoFn,
   getStorageStatus as getStorageStatusFn,
@@ -121,35 +120,34 @@ export async function persistTranscript(transcript: Transcript): Promise<void> {
 }
 
 /**
- * Upload a recording blob DIRECTLY to Cloud Storage using a server-signed
- * upload URL. The server signs the path with the service-role key (key never
- * reaches the browser); the browser then PUTs the raw bytes straight to the
- * signed URL — the large binary never passes through the Edge worker or the
- * preview gateway.
+ * Upload a recording blob to Cloud Storage through the same-origin Edge
+ * worker proxy at /api/upload/$id. The browser POSTs the raw bytes to the
+ * proxy (same-origin — no CORS preflight); the proxy forwards them to Cloud
+ * Storage with the service-role key (key never reaches the browser) and
+ * returns the object path.
  *
- * WHY direct-PUT and not the same-origin upload proxy: the proxy works in
- * isolation (a 4MB upload through the same route completes in ~300ms from a
- * server-side fetch), but the preview gateway's request-body path stalls for
- * multi-MB POST bodies — the browser's fetch never receives a response and
- * the only thing that stops it is the 120s client AbortController
- * ("fetch-aborted / no response"). Direct-PUT to the signed URL avoids the
- * gateway's body path entirely; Supabase's storage CDN serves the upload
- * directly with its own range/streaming support.
+ * WHY same-origin proxy and not a direct browser PUT to a signed upload URL:
+ * the bucket would need CORS rules for the app's origin to allow a
+ * cross-origin PUT, which the platform does not guarantee and we cannot set
+ * from here. A direct cross-origin PUT is rejected at the preflight and
+ * surfaces as "Failed to fetch" (TypeError) with NO HTTP response even for a
+ * tiny recording — exactly the regression observed (3ab… 153 KB, ~1.5s). The
+ * same-origin proxy avoids the cross-origin preflight entirely; this is the
+ * path that previously worked for small uploads.
  *
- * Diagnostics split the upload into distinct stages so the exact failing
- * point is visible, not lumped under one label:
- *   - "sign-url": the server RPC that creates the signed upload URL (no
- *     binary on the wire). A failure here means Cloud config/auth/routing,
- *     NOT the gateway body path.
- *   - "upload":  the direct PUT of the blob to the signed storage URL. A
- *     timeout here (fetch-aborted / no response) is the gateway-stall
- *     signature; an HTTP status is a storage rejection.
- * Metadata ("metadata") and post-upload HEAD verification ("verify") are
- * reported by the caller (saveRecording / retryUpload) under their own
- * stages. The signed URL/token is NEVER included in a diagnostic — see
- * redactSignedUrl, which scrubs any token/sig/signature/url query param.
+ * The larger-upload 120s timeout that the direct-PUT attempt tried to work
+ * around remains UNRESOLVED for now — the proxy still buffers the body
+ * server-side, so a multi-MB recording may still stall on the preview
+ * gateway's request-body path. That is a separate, pre-existing issue and
+ * does not block small/normal recordings.
  *
- * Returns true ONLY when the PUT returned 2xx (the object was accepted).
+ * Diagnostics label the stage "upload" and distinguish a real HTTP rejection
+ * (server-rejected, with the proxy/upstream status) from a transport failure
+ * (network / fetch-aborted, no response). The signed URL/token is NEVER
+ * included in a diagnostic — see redactSignedUrl, which scrubs any
+ * token/sig/signature/url query param.
+ *
+ * Returns true ONLY when the proxy returned 2xx (the object was accepted).
  */
 function redactSignedUrl(s: string | undefined | null): string {
   if (!s) return "";
@@ -181,62 +179,19 @@ async function uploadBlobDirect(
     rawName: null,
   };
 
-  // 1) Ask the server (service-role key) to sign an upload URL. Tiny RPC — no
-  //    binary over the wire, no gateway body path.
-  let signedUrl: string | null = null;
-  try {
-    const signRes = await withTimeout(createUploadUrlFn({ data: { id, ext } }), 12000);
-    if (!signRes?.ok || !signRes.url) {
-      const msg = redactSignedUrl(signRes?.error ?? "Could not create signed upload URL.");
-      console.warn("[upload] sign-url failed:", msg);
-      return {
-        ok: false,
-        error: msg,
-        diag: {
-          ...base,
-          stage: "sign-url",
-          failed: true,
-          // Distinguish the upstream storage status (a real HTTP rejection)
-          // from a transport failure. signRes.status is the storage API's
-          // response code when it rejected the request; null means the RPC
-          // failed before any storage response (network/abort).
-          httpStatus: signRes?.status ?? null,
-          errorKind: signRes?.status ? "server-rejected" : "server-rejected",
-          errorMessage: msg,
-          rawName: "SignUrl",
-        },
-      };
-    }
-    signedUrl = signRes.url;
-  } catch (e) {
-    const msg = redactSignedUrl(e instanceof Error ? e.message : "Sign URL transport error");
-    console.warn("[upload] sign-url threw:", msg);
-    return {
-      ok: false,
-      error: msg,
-      diag: {
-        ...base,
-        stage: "sign-url",
-        failed: true,
-        httpStatus: null,
-        errorKind: e instanceof Error && e.name === "AbortError" ? "fetch-aborted" : "network",
-        errorMessage: msg,
-        rawName: e instanceof Error ? e.name : "Error",
-      },
-    };
-  }
-
-  // 2) PUT the blob directly to the signed URL. Bounded so a stall surfaces as
-  //    a real HTTP status / abort message instead of hanging indefinitely.
+  // Same-origin POST to the Edge worker proxy. The proxy forwards the bytes
+  // to Cloud Storage with the service-role key; the browser never makes a
+  // cross-origin request, so there is no CORS preflight to reject. Bounded by
+  // an AbortController so a stall surfaces as a real error instead of hanging.
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 120000);
+  const timer = setTimeout(() => ctrl.abort(), 120_000);
   try {
-    const res = await fetch(signedUrl, {
-      method: "PUT",
+    const res = await fetch(`/api/upload/${id}`, {
+      method: "POST",
       signal: ctrl.signal,
       headers: {
         "Content-Type": mime || "application/octet-stream",
-        "x-upsert": "true",
+        "x-ext": ext,
       },
       body: blob,
     });
@@ -244,7 +199,7 @@ async function uploadBlobDirect(
     if (!res.ok) {
       const text = redactSignedUrl(await res.text().catch(() => ""));
       const msg = `Upload failed (${res.status})${text ? `: ${text.slice(0, 200)}` : ""}`;
-      console.warn("[upload] PUT failed:", res.status, text);
+      console.warn("[upload] proxy failed:", res.status, text);
       return {
         ok: false,
         status: res.status,
@@ -268,7 +223,7 @@ async function uploadBlobDirect(
     const isAbort = e instanceof Error && e.name === "AbortError";
     const kind = isAbort ? "fetch-aborted" : "network";
     const msg = redactSignedUrl(e instanceof Error ? e.message : "Upload transport error");
-    console.warn("[upload] PUT threw:", raw, msg);
+    console.warn("[upload] proxy threw:", raw, msg);
     return {
       ok: false,
       error: msg,
