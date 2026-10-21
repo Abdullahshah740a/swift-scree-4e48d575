@@ -193,6 +193,8 @@ function Library() {
   });
 
   const [pendingDelete, setPendingDelete] = useState<VideoRecord | null>(null);
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
+  const [deleteAllCount, setDeleteAllCount] = useState(0);
   const deleteVideoMut = useMutation({
     mutationFn: async (video: VideoRecord) => {
       await removeRecording(video.id, video.ext);
@@ -219,6 +221,40 @@ function Library() {
     },
   });
 
+  // ----- Delete all videos (bulk) -----
+  const deleteAllVideosMut = useMutation({
+    mutationFn: async (videos: VideoRecord[]) => {
+      // Delete every recording from cloud + local, preserving folders.
+      // Map to their results so the UI can report an honest count.
+      const results = await Promise.allSettled(videos.map((v) => removeRecording(v.id, v.ext)));
+      const okCount = results.filter((r) => r.status === "fulfilled").length;
+      return { okCount, total: videos.length };
+    },
+    onMutate: async (videos) => {
+      await qc.cancelQueries({ queryKey: ["videos"] });
+      const prevVideos = qc.getQueryData<VideoRecord[]>(["videos"]);
+      // Optimistically remove every video; folders are preserved.
+      qc.setQueryData<VideoRecord[]>(["videos"], []);
+      return { prevVideos };
+    },
+    onSuccess: ({ okCount, total }) => {
+      qc.invalidateQueries({ queryKey: ["videos"] });
+      if (okCount === total) {
+        toast.success(`Deleted ${total} recording${total === 1 ? "" : "s"}.`);
+      } else {
+        toast.error(`Deleted ${okCount} of ${total}. Some failed — try again.`);
+      }
+    },
+    onError: (_err, _videos, ctx) => {
+      if (ctx?.prevVideos) qc.setQueryData(["videos"], ctx.prevVideos);
+      toast.error("Could not delete all recordings. Please try again.");
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["videos"] });
+      setConfirmDeleteAll(false);
+      setDeleteAllCount(0);
+    },
+  });
   const unfiledCount = allVideos.filter((v) => !v.folderId).length;
   const folderCount = (fid: string) => allVideos.filter((v) => v.folderId === fid).length;
 
@@ -239,12 +275,27 @@ function Library() {
             folder{allFolders.length === 1 ? "" : "s"}
           </p>
         </div>
-        <Link
-          to="/record"
-          className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-transform hover:scale-[1.02]"
-        >
-          <Circle className="size-4 fill-current" /> New recording
-        </Link>
+        <div className="flex items-center gap-2">
+          {allVideos.length > 0 ? (
+            <button
+              type="button"
+              disabled={deleteAllVideosMut.isPending}
+              onClick={() => {
+                setDeleteAllCount(allVideos.length);
+                setConfirmDeleteAll(true);
+              }}
+              className="inline-flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm font-semibold text-destructive transition-transform hover:scale-[1.02] hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Trash2 className="size-4" /> Delete all videos
+            </button>
+          ) : null}
+          <Link
+            to="/record"
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-transform hover:scale-[1.02]"
+          >
+            <Circle className="size-4 fill-current" /> New recording
+          </Link>
+        </div>
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[220px_1fr]">
@@ -380,6 +431,48 @@ function Library() {
                 </span>
               ) : (
                 "Delete recording"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={confirmDeleteAll}
+        onOpenChange={(open) => {
+          if (!open && !deleteAllVideosMut.isPending) {
+            setConfirmDeleteAll(false);
+            setDeleteAllCount(0);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete all {deleteAllCount} recording{deleteAllCount === 1 ? "" : "s"}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Every recording in this library will be permanently removed from both this device and
+              the shared library — including their videos, comments, reactions, and transcripts.
+              Folders are preserved. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteAllVideosMut.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deleteAllVideosMut.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault();
+                if (allVideos.length) deleteAllVideosMut.mutate(allVideos);
+              }}
+            >
+              {deleteAllVideosMut.isPending ? (
+                <span className="inline-flex items-center gap-2">
+                  <Loader2 className="size-4 animate-spin" /> Deleting…
+                </span>
+              ) : (
+                `Delete all ${deleteAllCount} recording${deleteAllCount === 1 ? "" : "s"}`
               )}
             </AlertDialogAction>
           </AlertDialogFooter>
