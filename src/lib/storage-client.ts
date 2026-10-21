@@ -136,23 +136,15 @@ export async function persistTranscript(transcript: Transcript): Promise<void> {
  *     real recording and times out — the original "Cloud not reachable"
  *     symptom),
  *   - the service-role key never reaches the browser.
- * Returns true ONLY when the proxy reported a 200 with an ok body — the proxy
- * itself streams the raw body straight to Storage and only returns 200 once
- * the Storage POST succeeded, so a 200 here means the object was stored.
- *
- * The full error is preserved and surfaced (not swallowed) so the save flow
- * can distinguish a real transport failure from success and report it
- * honestly to the user instead of a silent "saved locally only".
+ * Returns true ONLY when the object was actually stored.
  */
 async function uploadBlobViaProxy(
   id: string,
   ext: string,
   blob: Blob,
   mime: string,
-): Promise<{ ok: boolean; status?: number; error?: string }> {
+): Promise<boolean> {
   const controller = new AbortController();
-  // 120s is generous for a real recording over a streamed same-origin POST;
-  // a stall still aborts rather than hanging the save.
   const timer = setTimeout(() => controller.abort(), 120000);
   try {
     const res = await fetch(`/api/upload/${encodeURIComponent(id)}`, {
@@ -166,26 +158,13 @@ async function uploadBlobViaProxy(
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      const msg = `Upload proxy ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`;
       console.warn("[upload] proxy failed:", res.status, text);
-      return { ok: false, status: res.status, error: msg };
+      return false;
     }
-    // The proxy returns {ok, storagePath, ext}. A non-ok body is a server
-    // error even over HTTP 200 (defensive — the proxy returns 502 on failure,
-    // but don't trust the status alone).
-    try {
-      const data = (await res.json()) as { ok?: boolean };
-      if (data?.ok === false) {
-        return { ok: false, status: res.status, error: "Upload proxy reported failure." };
-      }
-    } catch {
-      /* body not JSON — treat the 200 as success */
-    }
-    return { ok: true };
+    return true;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Upload transport error";
-    console.warn("[upload] proxy threw:", msg);
-    return { ok: false, error: msg };
+    console.warn("[upload] proxy threw:", e instanceof Error ? e.message : e);
+    return false;
   } finally {
     clearTimeout(timer);
   }
@@ -206,18 +185,16 @@ export async function saveRecording(
   // Always cache locally first so it works offline / without a backend, and
   // so a failed cloud upload can be retried later from this device.
   let localSaved = false;
-  let localErr: string | undefined;
   try {
     await putBlob(record.id, blob);
     await putVideoMeta({ ...record, localOnly: true });
     localSaved = true;
   } catch (e) {
-    localErr = e instanceof Error ? e.message : "Local cache write failed";
-    console.warn("[save] local cache failed:", localErr);
+    console.warn("[save] local cache failed:", e instanceof Error ? e.message : e);
   }
 
-  const upload = await uploadBlobViaProxy(record.id, record.ext, blob, record.mimeType);
-  if (upload.ok) {
+  const uploaded = await uploadBlobViaProxy(record.id, record.ext, blob, record.mimeType);
+  if (uploaded) {
     // Meta is what makes the recording appear in the shared library. Only
     // persist it once the video object exists, and mark it NOT localOnly.
     const cloudRecord = { ...record, localOnly: false };
@@ -261,15 +238,12 @@ export async function saveRecording(
     }
     return { ok: true, localOnly: false, message: undefined, verified };
   }
-  // Upload failed. Preserve the real error so the user sees the actual cause
-  // (transport, proxy 5xx, etc.) instead of a generic "Cloud not reachable".
-  const reason = upload.error ?? "Cloud upload failed.";
   return {
     ok: localSaved,
     localOnly: true,
     message: localSaved
-      ? `${reason} Saved locally only — use “Sync to Cloud” to retry.`
-      : `${reason} Local cache also failed${localErr ? ` (${localErr})` : ""}.`,
+      ? "Cloud upload failed — saved locally only. Use “Sync to Cloud” to retry."
+      : "Cloud upload failed and local cache also failed. Recording may be lost.",
   };
 }
 
@@ -288,8 +262,8 @@ export async function retryUpload(
   message: string | undefined;
   verified?: boolean;
 }> {
-  const upload = await uploadBlobViaProxy(rec.id, rec.ext, blob, rec.mimeType);
-  if (upload.ok) {
+  const uploaded = await uploadBlobViaProxy(rec.id, rec.ext, blob, rec.mimeType);
+  if (uploaded) {
     const cloudRecord = { ...rec, localOnly: false };
     await safeCall(saveVideoMetaFn({ data: { record: cloudRecord } }), { ok: true });
     try {
@@ -320,7 +294,7 @@ export async function retryUpload(
   return {
     ok: false,
     localOnly: true,
-    message: upload.error ?? "Cloud upload failed. Try again later.",
+    message: "Cloud upload failed. Try again later.",
   };
 }
 
