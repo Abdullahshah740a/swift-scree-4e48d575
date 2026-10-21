@@ -13,6 +13,16 @@ import {
 } from "@/lib/storage-client";
 import type { Folder, VideoRecord } from "@/lib/types";
 import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 export const Route = createFileRoute("/library")({
   head: () => ({
@@ -182,13 +192,30 @@ function Library() {
     },
   });
 
+  const [pendingDelete, setPendingDelete] = useState<VideoRecord | null>(null);
   const deleteVideoMut = useMutation({
     mutationFn: async (video: VideoRecord) => {
       await removeRecording(video.id, video.ext);
     },
-    onSuccess: () => {
+    onMutate: async (video) => {
+      await qc.cancelQueries({ queryKey: ["videos"] });
+      const prev = qc.getQueryData<VideoRecord[]>(["videos"]);
+      if (prev) {
+        qc.setQueryData<VideoRecord[]>(
+          ["videos"],
+          prev.filter((v) => v.id !== video.id),
+        );
+      }
+      return { prev };
+    },
+    onSuccess: (_d, video) => {
       qc.invalidateQueries({ queryKey: ["videos"] });
+      qc.removeQueries({ queryKey: ["video", video.id] });
       toast.success("Recording deleted");
+    },
+    onError: (_e, video, ctx) => {
+      if (ctx?.prev) qc.setQueryData(["videos"], ctx.prev);
+      toast.error(`Could not delete “${video.title}”. Restored — try again.`);
     },
   });
 
@@ -312,7 +339,7 @@ function Library() {
                   video={v}
                   folders={allFolders}
                   moving={movingId === v.id}
-                  onDelete={(vid) => deleteVideoMut.mutate(vid)}
+                  onDelete={(vid) => setPendingDelete(vid)}
                   onMove={(vid, fid) => moveMut.mutate({ video: vid, folderId: fid })}
                 />
               ))}
@@ -320,6 +347,44 @@ function Library() {
           )}
         </div>
       </div>
+
+      <AlertDialog
+        open={!!pendingDelete}
+        onOpenChange={(open) => {
+          if (!open) setPendingDelete(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this recording?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDelete
+                ? `“${pendingDelete.title}” will be permanently removed from both this device and the shared library. This cannot be undone.`
+                : "This recording will be permanently removed. This cannot be undone."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteVideoMut.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deleteVideoMut.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault();
+                if (pendingDelete)
+                  deleteVideoMut.mutate(pendingDelete, { onSuccess: () => setPendingDelete(null) });
+              }}
+            >
+              {deleteVideoMut.isPending ? (
+                <span className="inline-flex items-center gap-2">
+                  <Loader2 className="size-4 animate-spin" /> Deleting…
+                </span>
+              ) : (
+                "Delete recording"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
