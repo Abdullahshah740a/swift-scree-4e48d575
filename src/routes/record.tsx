@@ -47,6 +47,7 @@ function RecordPage() {
   const [title, setTitle] = useState("");
   const [desc, setDesc] = useState("");
   const [justUpdated, setJustUpdated] = useState(false);
+  const [updating, setUpdating] = useState(false);
 
   const { phase } = engine;
 
@@ -54,9 +55,14 @@ function RecordPage() {
     void engine.start({ source, author });
   }
   async function handleUpdateDetails() {
-    await engine.updateDetails({ title, description: desc, source, author });
-    setJustUpdated(true);
-    window.setTimeout(() => setJustUpdated(false), 2000);
+    setUpdating(true);
+    try {
+      await engine.updateDetails({ title, description: desc, source, author });
+      setJustUpdated(true);
+      window.setTimeout(() => setJustUpdated(false), 2000);
+    } finally {
+      setUpdating(false);
+    }
   }
   function handleNewOrReset() {
     if (phase === "stopped" && engine.savedId) {
@@ -263,13 +269,18 @@ function RecordPage() {
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={handleUpdateDetails}
-                  disabled={!engine.savedId}
-                  className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors disabled:opacity-50"
+                  disabled={!engine.savedId || updating}
+                  className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-primary-foreground transition-all hover:scale-[1.02] hover:shadow-lg hover:shadow-primary/25 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
                   style={{
                     backgroundColor: justUpdated ? "oklch(0.62 0.19 145)" : "var(--primary)",
                   }}
                 >
-                  <Check className="size-4" /> {justUpdated ? "Details Updated!" : "Update details"}
+                  {updating ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Check className="size-4" />
+                  )}{" "}
+                  {justUpdated ? "Details Updated!" : updating ? "Updating…" : "Update details"}
                 </button>
                 <button
                   onClick={handleNewOrReset}
