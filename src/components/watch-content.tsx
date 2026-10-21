@@ -377,6 +377,9 @@ export function WatchContent({
           <VideoPlayer
             ref={playerRef}
             src={url ?? ""}
+            durationHint={rec.duration}
+            mimeType={rec.mimeType}
+            repairSrc={`/api/video/${encodeURIComponent(rec.id)}?download=1`}
             fallbackSrc={fallbackUrl ?? undefined}
             poster={rec.thumbnail}
             comments={comments.data ?? []}
