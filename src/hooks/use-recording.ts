@@ -210,7 +210,18 @@ export function useRecordingEngine(qc: QueryClient): RecordingEngine {
       mimeType,
       chunksRef.current.length,
       totalSeconds,
-      { source: sourceRef.current, author: authorRef.current, thumbData },
+      {
+        source: sourceRef.current,
+        author: authorRef.current,
+        thumbData,
+        onPrepared: (blob) => {
+          blobRef.current = blob;
+          setPreviewUrl((previous) => {
+            if (previous) URL.revokeObjectURL(previous);
+            return URL.createObjectURL(blob);
+          });
+        },
+      },
     );
     if (!result.ok || !result.record) {
       setError(result.reason ?? "Recording could not be saved.");

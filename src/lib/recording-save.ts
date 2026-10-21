@@ -1,12 +1,14 @@
 import { canDecodeBlob, validateRecordingBlob } from "./media";
 import { extFromMime } from "./format";
 import { saveRecording } from "./storage-client";
+import { makeSeekableWebm } from "./seekable-webm";
 import type { SourceType, VideoRecord } from "./types";
 
 export interface FinalizeContext {
   source: SourceType;
   author: string;
   thumbData: string;
+  onPrepared?: (blob: Blob) => void;
 }
 
 export interface FinalizeResult {
@@ -39,6 +41,14 @@ export async function finalizeAndSaveRecording(
     console.warn("[record] recording rejected:", validation.reason);
     return { ok: false, reason: validation.reason };
   }
+
+  try {
+    blob = await makeSeekableWebm(blob);
+  } catch (error) {
+    // Preserve the original recording if container repair fails; never lose capture bytes.
+    console.warn("[record] WebM finalization failed; preserving original", error);
+  }
+  ctx.onPrepared?.(blob);
 
   const id = crypto.randomUUID();
   const ext = extFromMime(mime);
@@ -73,10 +83,11 @@ export async function finalizeAndSaveRecording(
     });
 
     const out: FinalizeResult = {
-      ok: true,
+      ok: result.ok,
       record,
       localOnly: result.localOnly,
     };
+    if (!result.ok) out.reason = result.message ?? "Recording could not be saved.";
     if (result.message !== undefined) out.message = result.message;
     return out;
   } catch (e) {

@@ -3,6 +3,8 @@ import { Play, Pause, Volume2, VolumeX, Maximize } from "lucide-react";
 import { formatDuration } from "@/lib/format";
 import type { Comment, Reaction } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { finiteDuration, seekTarget } from "@/lib/playback-time";
+import { makeSeekableWebm } from "@/lib/seekable-webm";
 
 export interface VideoPlayerHandle {
   getCurrentTime: () => number;
@@ -13,6 +15,9 @@ export interface VideoPlayerHandle {
 interface Props {
   src: string;
   fallbackSrc?: string | undefined;
+  repairSrc?: string;
+  mimeType?: string;
+  durationHint?: number;
   poster?: string;
   comments?: Comment[];
   reactions?: Reaction[];
@@ -20,7 +25,17 @@ interface Props {
 }
 
 export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPlayer(
-  { src, fallbackSrc, poster, comments = [], reactions = [], onTimeUpdate },
+  {
+    src,
+    fallbackSrc,
+    repairSrc,
+    mimeType,
+    durationHint,
+    poster,
+    comments = [],
+    reactions = [],
+    onTimeUpdate,
+  },
   ref,
 ) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -35,21 +50,95 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
   // fails.
   const [activeSrc, setActiveSrc] = useState(src);
   const triedFallback = useRef(false);
+  const [repairFor, setRepairFor] = useState<string | null>(null);
+  const [repairing, setRepairing] = useState(false);
+  const [repairWarning, setRepairWarning] = useState<string | null>(null);
+  const restorePlayback = useRef<{ time: number; playing: boolean } | null>(null);
 
   useEffect(() => {
     setActiveSrc(src);
     triedFallback.current = false;
     setVideoError(null);
+    setCurrent(0);
+    setDuration(0);
+    setPlaying(false);
+    setRepairFor(null);
+    setRepairing(false);
+    setRepairWarning(null);
+    restorePlayback.current = null;
   }, [src]);
+
+  // Old Firefox/MediaRecorder files have Duration=0 and no usable seek index.
+  // Rebuild a browser-local copy; the original cloud object stays recoverable.
+  useEffect(() => {
+    if (!src || repairFor !== src) return;
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new DOMException("Video repair timed out", "TimeoutError")),
+      120000,
+    );
+    let active = true;
+    let objectUrl: string | null = null;
+    setRepairing(true);
+    void (async () => {
+      try {
+        // Use the same-origin attachment stream for remote files, avoiding
+        // cross-origin redirects/CORS during the repair download.
+        const response = await fetch(src.startsWith("blob:") ? src : (repairSrc ?? src), {
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`Video download failed (${response.status}).`);
+        const original = await response.blob();
+        const blob = new Blob([original], { type: mimeType || original.type });
+        const repaired = await makeSeekableWebm(blob, controller.signal);
+        controller.signal.throwIfAborted();
+        const video = videoRef.current;
+        restorePlayback.current = {
+          time: video?.currentTime ?? 0,
+          playing: !!video && !video.paused,
+        };
+        objectUrl = URL.createObjectURL(repaired);
+        setVideoError(null);
+        setActiveSrc(objectUrl);
+      } catch (error) {
+        if (!active) {
+          // Unmount/source changes must not update a different recording.
+          return;
+        }
+        console.warn("[player] WebM repair failed", error);
+        setRepairWarning("Could not prepare seeking. Reload the recording to try again.");
+      } finally {
+        clearTimeout(timer);
+        if (active) setRepairing(false);
+      }
+    })();
+    return () => {
+      active = false;
+      controller.abort();
+      clearTimeout(timer);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [src, repairFor, repairSrc, mimeType]);
+
+  const displayDuration = finiteDuration(duration) || finiteDuration(durationHint);
+  const seek = useCallback(
+    (time: number) => {
+      const video = videoRef.current;
+      const target = seekTarget(time, displayDuration);
+      if (!video || target === null || video.readyState < 1) return;
+      try {
+        video.currentTime = target;
+        setCurrent(target);
+      } catch (error) {
+        console.warn("[player] seek unavailable", error);
+      }
+    },
+    [displayDuration],
+  );
 
   useImperativeHandle(ref, () => ({
     getCurrentTime: () => videoRef.current?.currentTime ?? 0,
-    seek: (t: number) => {
-      if (videoRef.current) {
-        videoRef.current.currentTime = t;
-        setCurrent(t);
-      }
-    },
+    seek,
     getVideo: () => videoRef.current,
   }));
 
@@ -65,7 +154,22 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
     if (!v) return;
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
-    const onDur = () => setDuration(v.duration || 0);
+    const onDur = () => {
+      const actual = finiteDuration(v.duration);
+      setDuration(actual);
+      if (actual && !v.error) setVideoError(null);
+      if (v.readyState >= 1 && !actual && mimeType?.toLowerCase().includes("webm")) {
+        setRepairFor(src);
+      }
+      if (actual && restorePlayback.current) {
+        const restore = restorePlayback.current;
+        restorePlayback.current = null;
+        // A fresh source already starts at zero. Forcing an early seek to zero
+        // during loadedmetadata can fail before the demuxer has buffered frames.
+        if (restore.time > 0) v.currentTime = seekTarget(restore.time, actual) ?? 0;
+        if (restore.playing) void v.play().catch(() => {});
+      }
+    };
     const onTime = () => {
       setCurrent(v.currentTime);
       onTimeUpdate?.(v.currentTime);
@@ -82,9 +186,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
       v.removeEventListener("durationchange", onDur);
       v.removeEventListener("timeupdate", onTime);
     };
-  }, [onTimeUpdate]);
+  }, [onTimeUpdate, mimeType, src]);
 
-  const pct = duration > 0 ? (current / duration) * 100 : 0;
+  const pct = displayDuration > 0 ? Math.min(100, (current / displayDuration) * 100) : 0;
   const markers = [
     ...comments.map((c) => ({ time: c.time, kind: "comment" as const })),
     ...reactions.map((r) => ({ time: r.time, kind: "reaction" as const })),
@@ -92,6 +196,15 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
 
   return (
     <div className="group relative overflow-hidden rounded-xl border border-border/60 bg-black">
+      {repairing || repairWarning ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="absolute inset-x-0 top-0 z-10 bg-black/75 px-3 py-2 text-xs text-white"
+        >
+          {repairing ? "Preparing video seeking…" : repairWarning}
+        </div>
+      ) : null}
       {videoError ? (
         <div className="flex min-h-[320px] flex-col items-center justify-center p-6 text-center text-muted-foreground">
           <p className="text-sm font-medium text-foreground">Playback issue</p>
@@ -114,11 +227,18 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
         preload="auto"
         controls={false}
         onError={async (e) => {
-          const err = e.currentTarget.error;
+          const failedVideo = e.currentTarget;
+          const err = failedVideo.error;
           if (!err) return;
+          const failedSource = failedVideo.currentSrc;
+          const isCurrentFailure = () =>
+            videoRef.current === failedVideo &&
+            failedVideo.currentSrc === failedSource &&
+            failedVideo.error !== null;
           console.warn("Video playback error code:", err.code, err.message, "src:", activeSrc);
           // Ignore aborted loads (code 1) from src swaps.
           if (!activeSrc || err.code === 1) return;
+          if (repairing) return;
 
           // Probe the source to distinguish "file missing / unreachable" from
           // a decode/format problem. A 410 from the playback route means the
@@ -139,8 +259,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
           let missing = false;
           try {
             const probe = await fetch(activeSrc, { method: "GET" });
+            if (!isCurrentFailure()) {
+              void probe.body?.cancel();
+              return;
+            }
             if (probe.status === 410) {
               const body = await probe.json().catch(() => ({}));
+              if (!isCurrentFailure()) return;
               missing = true;
               setVideoError(
                 body.message ??
@@ -157,6 +282,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
           } catch {
             /* fall through to fallback handling */
           }
+
+          // A probe for the old URL may finish after WebM repair/source swap.
+          if (!isCurrentFailure()) return;
 
           // Try the remote streaming URL once before giving up.
           if (!triedFallback.current && fallbackSrc && fallbackSrc !== activeSrc) {
@@ -180,11 +308,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
         <div
           className="relative mb-2 h-2 cursor-pointer rounded-full bg-white/20"
           onClick={(e) => {
-            const v = videoRef.current;
-            if (!v || !duration) return;
             const rect = e.currentTarget.getBoundingClientRect();
-            const t = ((e.clientX - rect.left) / rect.width) * duration;
-            v.currentTime = t;
+            if (rect.width <= 0) return;
+            seek(((e.clientX - rect.left) / rect.width) * displayDuration);
           }}
         >
           <div
@@ -199,7 +325,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
                 "absolute top-1/2 size-2 -translate-x-1/2 -translate-y-1/2 rounded-full",
                 m.kind === "comment" ? "bg-accent" : "bg-primary",
               )}
-              style={{ left: `${duration ? (m.time / duration) * 100 : 0}%` }}
+              style={{ left: `${displayDuration ? (m.time / displayDuration) * 100 : 0}%` }}
             />
           ))}
         </div>
@@ -208,7 +334,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(function VideoPl
             {playing ? <Pause className="size-5" /> : <Play className="size-5" />}
           </button>
           <span className="font-mono text-xs tabular-nums">
-            {formatDuration(current)} / {formatDuration(duration)}
+            {formatDuration(current)} / {formatDuration(displayDuration)}
           </span>
           <div className="ml-auto flex items-center gap-2">
             <button

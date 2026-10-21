@@ -38,6 +38,7 @@ import type {
   VideoRecord,
 } from "./types";
 import { safeCall, withTimeout } from "./with-timeout";
+import { makeSeekableWebm } from "./seekable-webm";
 
 const DEFAULT_STATUS: StorageStatus = {
   configured: false,
@@ -262,6 +263,13 @@ export async function retryUpload(
   message: string | undefined;
   verified?: boolean;
 }> {
+  try {
+    blob = await makeSeekableWebm(blob);
+    rec = { ...rec, size: blob.size };
+    await putBlob(rec.id, blob);
+  } catch (error) {
+    console.warn("[retry] could not finalize local WebM", error);
+  }
   const uploaded = await uploadBlobViaProxy(rec.id, rec.ext, blob, rec.mimeType);
   if (uploaded) {
     const cloudRecord = { ...rec, localOnly: false };
