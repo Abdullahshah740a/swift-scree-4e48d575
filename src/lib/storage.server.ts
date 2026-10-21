@@ -512,3 +512,41 @@ export async function saveTranscript(transcript: Transcript): Promise<void> {
   if (!configured()) return;
   await uploadJson(`transcript/${transcript.videoId}.json`, transcript);
 }
+
+/* ---- Bulk delete (all videos + their meta/comments/reactions/transcript) ---- */
+
+/**
+ * Delete every recording from Cloud Storage: video binaries, metadata, and
+ * the per-video comments/reactions/transcript. Folders are preserved (this
+ * only removes videos). Each prefix is listed and its objects removed with
+ * bounded concurrency; a per-object failure never aborts the rest. Returns
+ * a count of objects removed and an explicit ok/error so the client can
+ * distinguish a confirmed wipe from a transport/not-configured failure
+ * instead of swallowing it into a success-shaped fallback.
+ */
+export async function deleteAllVideos(): Promise<{
+  ok: boolean;
+  deleted: number;
+  error?: string;
+}> {
+  if (!configured()) return { ok: false, deleted: 0, error: NOT_CONFIGURED_MSG };
+  try {
+    const prefixes = ["videos/", "meta/", "comments/", "reactions/", "transcript/"];
+    let deleted = 0;
+    for (const prefix of prefixes) {
+      let names: string[] = [];
+      try {
+        names = await listObjects(prefix);
+      } catch {
+        /* prefix may be empty/absent — skip */
+      }
+      await pool(names, 8, async (n) => {
+        await removeObject(`${prefix}${n}`);
+        deleted += 1;
+      });
+    }
+    return { ok: true, deleted };
+  } catch (e) {
+    return { ok: false, deleted: 0, error: errMsg(e) };
+  }
+}

@@ -100,3 +100,27 @@ export async function getBlob(id: string): Promise<Blob | null> {
 export async function deleteBlob(id: string): Promise<void> {
   await tx(BLOB_STORE, "readwrite", (s) => s.delete(id));
 }
+
+/**
+ * Clear every locally-cached recording (metadata + blobs). Used by the bulk
+ * "Delete all" flow so local-only recordings whose cloud upload never
+ * succeeded also vanish from this device — the cloud delete handles the
+ * shared library; this handles the IndexedDB cache.
+ */
+export async function clearAllLocalVideos(): Promise<void> {
+  const db = await getDB();
+  await Promise.all([
+    new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(META_STORE, "readwrite");
+      transaction.objectStore(META_STORE).clear();
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    }),
+    new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(BLOB_STORE, "readwrite");
+      transaction.objectStore(BLOB_STORE).clear();
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    }),
+  ]);
+}

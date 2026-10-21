@@ -1,6 +1,7 @@
 import {
   checkVideoObject as checkVideoObjectFn,
   createFolder as createFolderFn,
+  deleteAllVideos as deleteAllVideosFn,
   deleteFolder as deleteFolderFn,
   deleteVideo as deleteVideoFn,
   getStorageStatus as getStorageStatusFn,
@@ -18,6 +19,7 @@ import {
   saveVideoMeta as saveVideoMetaFn,
 } from "./storage.functions";
 import {
+  clearAllLocalVideos,
   deleteBlob,
   deleteVideoMeta,
   getAllVideoMeta,
@@ -324,6 +326,43 @@ export async function removeRecording(id: string, ext: string): Promise<void> {
   } catch {
     /* best-effort */
   }
+}
+
+/**
+ * Delete every recording from the shared library (cloud) AND this device's
+ * local cache. Surfaces a typed result so the UI can distinguish a confirmed
+ * wipe (ok: true) from a transport/not-configured failure rather than
+ * swallowing it — the local cache is only cleared when the cloud delete
+ * succeeds, so a failed bulk delete never silently empties this device.
+ */
+export async function removeAllVideos(): Promise<{
+  ok: boolean;
+  deleted: number;
+  message?: string;
+}> {
+  let res: { ok: boolean; deleted: number; error?: string };
+  try {
+    res = await withTimeout(deleteAllVideosFn({ data: {} }), 30000);
+  } catch (e) {
+    return {
+      ok: false,
+      deleted: 0,
+      message: e instanceof Error ? e.message : "Cloud delete failed. Please try again.",
+    };
+  }
+  if (!res.ok) {
+    return {
+      ok: false,
+      deleted: 0,
+      message: res.error ?? "Cloud delete failed. Please try again.",
+    };
+  }
+  try {
+    await clearAllLocalVideos();
+  } catch (e) {
+    console.warn("[delete-all] local cache clear failed:", e instanceof Error ? e.message : e);
+  }
+  return { ok: true, deleted: res.deleted };
 }
 
 /**

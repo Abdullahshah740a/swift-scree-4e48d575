@@ -1,6 +1,15 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Folder as FolderIcon, Film, Trash2, Circle, Loader2, Inbox } from "lucide-react";
+import {
+  Plus,
+  Folder as FolderIcon,
+  Film,
+  Trash2,
+  Circle,
+  Loader2,
+  Inbox,
+  Layers,
+} from "lucide-react";
 import { useState } from "react";
 import { VideoCard } from "@/components/video-card";
 import {
@@ -9,6 +18,7 @@ import {
   fetchFolders,
   fetchVideos,
   moveVideoStrict,
+  removeAllVideos,
   removeRecording,
 } from "@/lib/storage-client";
 import type { Folder, VideoRecord } from "@/lib/types";
@@ -219,6 +229,35 @@ function Library() {
     },
   });
 
+  // ----- Bulk delete (all videos, cloud + local, optimistic + rollback) -----
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
+  const deleteAllMut = useMutation({
+    mutationFn: async () => removeAllVideos(),
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey: ["videos"] });
+      const prev = qc.getQueryData<VideoRecord[]>(["videos"]);
+      if (prev) {
+        // Optimistic: empty the library immediately. The local cache is only
+        // cleared by removeAllVideos() once the cloud delete confirms, so a
+        // failed bulk delete never silently empties this device — we roll back.
+        qc.setQueryData<VideoRecord[]>(["videos"], []);
+      }
+      return { prev };
+    },
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["videos"] });
+      toast.success(
+        res.ok
+          ? `Deleted ${res.deleted} recording${res.deleted === 1 ? "" : "s"}`
+          : (res.message ?? "Could not delete all recordings."),
+      );
+    },
+    onError: (_e, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(["videos"], ctx.prev);
+      toast.error("Could not delete all recordings. Restored — try again.");
+    },
+  });
+
   const unfiledCount = allVideos.filter((v) => !v.folderId).length;
   const folderCount = (fid: string) => allVideos.filter((v) => v.folderId === fid).length;
 
@@ -231,7 +270,7 @@ function Library() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
-      <div className="flex items-end justify-between">
+      <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-foreground">Library</h1>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -239,12 +278,23 @@ function Library() {
             folder{allFolders.length === 1 ? "" : "s"}
           </p>
         </div>
-        <Link
-          to="/record"
-          className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-transform hover:scale-[1.02]"
-        >
-          <Circle className="size-4 fill-current" /> New recording
-        </Link>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={allVideos.length === 0 || deleteAllMut.isPending}
+            onClick={() => setConfirmDeleteAll(true)}
+            className="inline-flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive transition-all hover:bg-destructive/20 hover:scale-[1.02] disabled:pointer-events-none disabled:opacity-40"
+          >
+            <Layers className="size-4" />
+            Delete all videos
+          </button>
+          <Link
+            to="/record"
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-transform hover:scale-[1.02]"
+          >
+            <Circle className="size-4 fill-current" /> New recording
+          </Link>
+        </div>
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[220px_1fr]">
@@ -380,6 +430,48 @@ function Library() {
                 </span>
               ) : (
                 "Delete recording"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={confirmDeleteAll}
+        onOpenChange={(open) => {
+          if (!open && !deleteAllMut.isPending) setConfirmDeleteAll(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete all recordings?</AlertDialogTitle>
+            <AlertDialogDescription>
+              All {allVideos.length} recording{allVideos.length === 1 ? "" : "s"} will be
+              permanently removed from both this device and the shared library — including their
+              video files, metadata, comments, reactions, and transcripts. Folders are kept. This
+              cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteAllMut.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deleteAllMut.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault();
+                deleteAllMut.mutate(undefined, {
+                  onSuccess: (res) => {
+                    if (res.ok) setConfirmDeleteAll(false);
+                  },
+                });
+              }}
+            >
+              {deleteAllMut.isPending ? (
+                <span className="inline-flex items-center gap-2">
+                  <Loader2 className="size-4 animate-spin" /> Deleting all…
+                </span>
+              ) : (
+                "Delete all recordings"
               )}
             </AlertDialogAction>
           </AlertDialogFooter>

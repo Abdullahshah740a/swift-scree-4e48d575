@@ -4,6 +4,7 @@ import {
   checkVideoObject as checkVideoObjectServer,
   createFolder as createFolderServer,
   createUploadUrl as createUploadUrlServer,
+  deleteAllVideos as deleteAllVideosServer,
   deleteFolder as deleteFolderServer,
   deleteVideo as deleteVideoServer,
   getStorageStatus as getStorageStatusServer,
@@ -122,3 +123,7 @@ export const saveTranscript = createServerFn({ method: "POST" })
     await saveTranscriptServer(data.transcript as Transcript);
     return { ok: true };
   });
+
+export const deleteAllVideos = createServerFn({ method: "POST" })
+  .validator((data) => z.object({}).parse(data ?? {}))
+  .handler(async () => deleteAllVideosServer());
