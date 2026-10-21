@@ -357,12 +357,7 @@ export async function listFolders(): Promise<Folder[]> {
         .filter((f): f is Folder => !!f && typeof f.id === "string" && typeof f.name === "string")
         .sort((a, b) => a.createdAt - b.createdAt);
     }
-    // Legacy migration: read the old whole-list file once, split it into
-    // per-folder objects, then DELETE the legacy file so a folder the user
-    // has deleted can never be resurrected by a future read. This is a
-    // one-time migration; folders are never re-created unless the user
-    // adds them. Best-effort: a failed legacy delete just leaves a stale
-    // file, but per-folder objects are now the source of truth.
+    // Legacy migration: read the old whole-list file once and split it.
     const legacy = await downloadJson<Folder[]>("folders.json");
     if (Array.isArray(legacy) && legacy.length > 0) {
       await Promise.all(
@@ -372,11 +367,6 @@ export async function listFolders(): Promise<Folder[]> {
           }),
         ),
       );
-      try {
-        await removeObject("folders.json");
-      } catch {
-        /* best-effort cleanup — don't block the read */
-      }
       return legacy
         .filter((f) => typeof f.id === "string" && typeof f.name === "string")
         .sort((a, b) => a.createdAt - b.createdAt);
@@ -384,28 +374,6 @@ export async function listFolders(): Promise<Folder[]> {
     return [];
   } catch {
     return [];
-  }
-}
-
-/**
- * Strip a folder id from the legacy whole-list `folders.json` (if it still
- * exists). After the one-time migration in `listFolders`, the legacy file is
- * deleted, but if a delete happens before that migration runs, this keeps the
- * legacy list from resurrecting the deleted folder on the next read. If the
- * filtered list is empty, remove the legacy file entirely.
- */
-async function removeFromLegacyFolders(id: string): Promise<void> {
-  try {
-    const legacy = await downloadJson<Folder[]>("folders.json");
-    if (!Array.isArray(legacy) || legacy.length === 0) return;
-    const next = legacy.filter((f) => f.id !== id);
-    if (next.length === 0) {
-      await removeObject("folders.json");
-    } else if (next.length !== legacy.length) {
-      await uploadJson("folders.json", next);
-    }
-  } catch {
-    /* legacy file absent or unreadable — nothing to clean */
   }
 }
 
@@ -445,11 +413,6 @@ export async function deleteFolder(id: string): Promise<FolderOpResult> {
     } catch {
       /* ignore */
     }
-    // Also strip it from the legacy whole-list `folders.json` so the
-    // legacy-migration branch in listFolders() can't resurrect a folder the
-    // user has deleted. (After the first listFolders() migration the legacy
-    // file is gone, but a delete before that migration must still clean it.)
-    await removeFromLegacyFolders(id);
     // Preserve its recordings by clearing their folder assignment.
     const names = await listObjects("meta/");
     const jsons = names.filter((n) => n.endsWith(".json"));
@@ -548,42 +511,4 @@ export async function getTranscript(videoId: string): Promise<Transcript | null>
 export async function saveTranscript(transcript: Transcript): Promise<void> {
   if (!configured()) return;
   await uploadJson(`transcript/${transcript.videoId}.json`, transcript);
-}
-
-/* ---- Bulk delete (all videos + their meta/comments/reactions/transcript) ---- */
-
-/**
- * Delete every recording from Cloud Storage: video binaries, metadata, and
- * the per-video comments/reactions/transcript. Folders are preserved (this
- * only removes videos). Each prefix is listed and its objects removed with
- * bounded concurrency; a per-object failure never aborts the rest. Returns
- * a count of objects removed and an explicit ok/error so the client can
- * distinguish a confirmed wipe from a transport/not-configured failure
- * instead of swallowing it into a success-shaped fallback.
- */
-export async function deleteAllVideos(): Promise<{
-  ok: boolean;
-  deleted: number;
-  error?: string;
-}> {
-  if (!configured()) return { ok: false, deleted: 0, error: NOT_CONFIGURED_MSG };
-  try {
-    const prefixes = ["videos/", "meta/", "comments/", "reactions/", "transcript/"];
-    let deleted = 0;
-    for (const prefix of prefixes) {
-      let names: string[] = [];
-      try {
-        names = await listObjects(prefix);
-      } catch {
-        /* prefix may be empty/absent — skip */
-      }
-      await pool(names, 8, async (n) => {
-        await removeObject(`${prefix}${n}`);
-        deleted += 1;
-      });
-    }
-    return { ok: true, deleted };
-  } catch (e) {
-    return { ok: false, deleted: 0, error: errMsg(e) };
-  }
 }
